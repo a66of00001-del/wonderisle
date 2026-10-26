@@ -1,0 +1,2915 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WonderIsle 奇想學島 | 3D 玩具微縮學習城市</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Font Awesome -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <!-- Google Fonts: Nunito & Noto Sans TC -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;600;700&family=Noto+Sans+TC:wght@400;600;800&display=swap" rel="stylesheet">
+  <!-- Three.js (3D Engine) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <!-- Tone.js (Procedural Toy Sounds & Ambience) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.min.js"></script>
+
+  <!-- 本地永久持久化資料庫引擎 (IndexedDB) -->
+  <script>
+    window.IslandDB = {
+      dbName: 'WonderIsleCampusDB',
+      version: 1,
+      db: null,
+
+      init() {
+        return new Promise((resolve) => {
+          try {
+            const req = indexedDB.open(this.dbName, this.version);
+            req.onupgradeneeded = (e) => {
+              const db = e.target.result;
+              if (!db.objectStoreNames.contains('stickies')) {
+                db.createObjectStore('stickies', { keyPath: 'id' });
+              }
+              if (!db.objectStoreNames.contains('customIslands')) {
+                db.createObjectStore('customIslands', { keyPath: 'id' });
+              }
+              if (!db.objectStoreNames.contains('userProfile')) {
+                db.createObjectStore('userProfile', { keyPath: 'key' });
+              }
+            };
+            req.onsuccess = (e) => {
+              this.db = e.target.result;
+              console.log('📦 本地永久資料庫 (IndexedDB) 已連線就緒！');
+              resolve(this.db);
+            };
+            req.onerror = (e) => {
+              console.warn('IndexedDB 開啟失敗，降級運作：', e);
+              resolve(null);
+            };
+          } catch (err) {
+            console.warn('IndexedDB 不受當前環境支援：', err);
+            resolve(null);
+          }
+        });
+      },
+
+      async saveSticky(sticky) {
+        if (!this.db) return;
+        return new Promise((resolve) => {
+          try {
+            const tx = this.db.transaction('stickies', 'readwrite');
+            const store = tx.objectStore('stickies');
+            store.put(sticky);
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+          } catch(e) { resolve(false); }
+        });
+      },
+
+      async getAllStickies() {
+        if (!this.db) return [];
+        return new Promise((resolve) => {
+          try {
+            const tx = this.db.transaction('stickies', 'readonly');
+            const store = tx.objectStore('stickies');
+            const req = store.getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => resolve([]);
+          } catch(e) { resolve([]); }
+        });
+      },
+
+      async saveCustomIsland(island) {
+        if (!this.db) return;
+        return new Promise((resolve) => {
+          try {
+            const tx = this.db.transaction('customIslands', 'readwrite');
+            const store = tx.objectStore('customIslands');
+            store.put(island);
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+          } catch(e) { resolve(false); }
+        });
+      },
+
+      async getAllCustomIslands() {
+        if (!this.db) return [];
+        return new Promise((resolve) => {
+          try {
+            const tx = this.db.transaction('customIslands', 'readonly');
+            const store = tx.objectStore('customIslands');
+            const req = store.getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => resolve([]);
+          } catch(e) { resolve([]); }
+        });
+      },
+
+      async saveProfile(profile) {
+        if (!this.db) return;
+        return new Promise((resolve) => {
+          try {
+            const tx = this.db.transaction('userProfile', 'readwrite');
+            const store = tx.objectStore('userProfile');
+            store.put({ key: 'current_user', data: profile });
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+          } catch(e) { resolve(false); }
+        });
+      },
+
+      async getProfile() {
+        if (!this.db) return null;
+        return new Promise((resolve) => {
+          try {
+            const tx = this.db.transaction('userProfile', 'readonly');
+            const store = tx.objectStore('userProfile');
+            const req = store.get('current_user');
+            req.onsuccess = () => resolve(req.result ? req.result.data : null);
+            req.onerror = () => resolve(null);
+          } catch(e) { resolve(null); }
+        });
+      }
+    };
+  </script>
+
+  <!-- Firebase 模組化 SDK (即時多人同步與持久存儲) -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { 
+      getFirestore, 
+      doc, 
+      setDoc, 
+      getDocs,
+      collection, 
+      onSnapshot 
+    } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    // 匯出給全域環境安全呼叫
+    window.firebaseCollection = collection;
+    window.firebaseDoc = doc;
+    window.firebaseSetDoc = setDoc;
+    window.firebaseOnSnapshot = onSnapshot;
+
+    // 全域雲端實例封裝
+    window.CloudSync = {
+      isReady: false,
+      db: null,
+      auth: null,
+      currentUser: null,
+      appId: typeof __app_id !== 'undefined' ? __app_id : 'wonderisle-dorm-hub',
+
+      async init(manualConfig = null) {
+        try {
+          let firebaseConfig = null;
+          if (manualConfig) {
+            firebaseConfig = manualConfig;
+          } else if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+            firebaseConfig = JSON.parse(__firebase_config);
+          } else {
+            console.log('ℹ️ 未偵測到雲端連線設定，啟用「瀏覽器 IndexedDB 本地永久儲存」模式。');
+            window.updateSyncStatusBadge('local');
+            return;
+          }
+
+          const app = initializeApp(firebaseConfig);
+          const auth = getAuth(app);
+          const db = getFirestore(app);
+
+          this.db = db;
+          this.auth = auth;
+
+          if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+            await signInWithCustomToken(auth, __initial_auth_token);
+          } else {
+            await signInAnonymously(auth);
+          }
+
+          this.currentUser = auth.currentUser;
+          this.isReady = !!this.currentUser;
+
+          if (this.isReady) {
+            console.log('✅ 雲端多人同步已就緒，使用者 UID:', this.currentUser.uid);
+            window.updateSyncStatusBadge('cloud');
+            window.startLiveSubscriptions();
+            window.updateMyPresence();
+          }
+        } catch (err) {
+          console.warn('雲端連線未啟用或憑證異常，維持本地安全持久模式：', err);
+          window.updateSyncStatusBadge('local');
+        }
+      }
+    };
+  </script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            clay: {
+              sand: '#F7E1B5',
+              cream: '#FFF9E6',
+              peach: '#FFB896',
+              teal: '#4E9F9D',
+              deepTeal: '#2A5C5B',
+              terracotta: '#E26D5C',
+              gold: '#F4B246',
+              paper: '#FFFDF9',
+              slate: '#39424E'
+            }
+          },
+          fontFamily: {
+            toy: ['Fredoka', 'Noto Sans TC', 'sans-serif'],
+            sans: ['Noto Sans TC', 'Inter', 'sans-serif']
+          },
+          boxShadow: {
+            'toy': '0 8px 0 rgba(0,0,0,0.12), 0 16px 25px -6px rgba(0,0,0,0.15)',
+            'toy-pressed': '0 2px 0 rgba(0,0,0,0.12), 0 4px 8px rgba(0,0,0,0.1)',
+            'island': '0 25px 50px -12px rgba(42, 92, 91, 0.25)'
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    body {
+      font-family: 'Noto Sans TC', 'Fredoka', sans-serif;
+      overflow: hidden;
+      user-select: none;
+      -webkit-user-select: none;
+      background-color: #A3D8DF;
+    }
+    
+    /* 仿玩具塑膠與模型柔和質感 */
+    .toy-panel {
+      background: rgba(255, 253, 249, 0.92);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 3px solid #FFF3DE;
+      box-shadow: 0 12px 32px rgba(45, 78, 80, 0.15);
+      border-radius: 28px;
+    }
+
+    .toy-btn {
+      transition: all 0.15s cubic-bezier(0.34, 1.56, 0.64, 1);
+      box-shadow: 0 5px 0 rgba(0, 0, 0, 0.15);
+    }
+    .toy-btn:active {
+      transform: translateY(4px);
+      box-shadow: 0 1px 0 rgba(0, 0, 0, 0.15);
+    }
+
+    /* 隱藏滾動條但保持滾動 */
+    .no-scrollbar::-webkit-scrollbar {
+      display: none;
+    }
+    .no-scrollbar {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+
+    /* 浮動呼吸燈動畫 */
+    @keyframes bobbing {
+      0%, 100% { transform: translateY(0px); }
+      50% { transform: translateY(-6px); }
+    }
+    .animate-bob {
+      animation: bobbing 3.5s ease-in-out infinite;
+    }
+
+    /* 氣泡發光 */
+    .glow-tag {
+      box-shadow: 0 0 15px rgba(244, 178, 70, 0.4);
+    }
+  </style>
+</head>
+<body class="relative w-screen h-screen m-0 p-0 text-clay-slate">
+
+  <!-- 3D Canvas 容器 -->
+  <div id="canvas-container" class="absolute inset-0 z-0 cursor-grab active:cursor-grabbing"></div>
+
+  <!-- 頂部導航列：島嶼情報、品牌、在線同行者 -->
+  <header class="absolute top-4 left-4 right-4 z-20 flex items-center justify-between pointer-events-none">
+    <!-- 品牌 Logo 標籤 -->
+    <div class="pointer-events-auto flex items-center gap-3 bg-white/90 backdrop-blur-md px-4 py-2.5 rounded-full shadow-lg border-2 border-amber-100">
+      <div class="w-10 h-10 rounded-full bg-gradient-to-tr from-clay-terracotta to-clay-gold flex items-center justify-center text-white text-xl shadow-inner font-bold">
+        <i class="fa-solid fa-shapes"></i>
+      </div>
+      <div>
+        <h1 class="text-base font-extrabold text-clay-slate leading-none tracking-wide">WonderIsle <span class="text-xs text-clay-teal font-bold bg-teal-50 px-2 py-0.5 rounded-full ml-1 border border-teal-200">奇想學島</span></h1>
+        <p class="text-xs text-stone-500 font-medium">六角微縮玩具學習聚落 • v2.6</p>
+      </div>
+    </div>
+
+    <!-- 即時狀態、音樂開關、同島學習者數 -->
+    <div class="pointer-events-auto flex items-center gap-2 sm:gap-3">
+      <!-- 專注白噪音 / 音效按鈕 -->
+      <button id="sound-btn" class="toy-btn px-3 py-2 bg-white/90 hover:bg-white text-stone-600 rounded-2xl flex items-center gap-2 border border-stone-200 text-sm font-semibold">
+        <i class="fa-solid fa-volume-xmark text-amber-500 text-base" id="sound-icon"></i>
+        <span class="hidden md:inline" id="sound-text">開啟島上微風音</span>
+      </button>
+
+      <!-- 雲端多人同步徽章 -->
+      <div id="cloud-sync-status" class="bg-white/90 px-3 py-2 rounded-2xl border border-stone-200 flex items-center gap-2 shadow-sm text-sm cursor-pointer hover:bg-stone-50 transition" title="點擊檢視儲存狀態與雲端金鑰設定">
+        <span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+        <span class="text-xs font-bold text-stone-700" id="sync-status-text">本地永久儲存中</span>
+        <i class="fa-solid fa-gear text-stone-400 text-xs"></i>
+      </div>
+
+      <!-- 目前在線旅人 -->
+      <div class="bg-white/90 px-3.5 py-2 rounded-2xl border border-stone-200 flex items-center gap-2 shadow-sm text-sm">
+        <span class="relative flex h-2.5 w-2.5">
+          <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+          <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+        </span>
+        <span class="font-bold text-stone-700" id="live-users-count">18</span>
+        <span class="text-xs text-stone-500 hidden sm:inline">位學習者登島中</span>
+      </div>
+
+      <!-- 畫面自訂按鈕 -->
+      <button id="open-studio-btn" class="toy-btn px-3 py-2 bg-gradient-to-r from-amber-400 to-orange-400 hover:from-amber-500 hover:to-orange-500 text-stone-900 rounded-2xl flex items-center gap-1.5 text-sm font-extrabold shadow-sm">
+        <i class="fa-solid fa-palette text-sm"></i>
+        <span class="hidden sm:inline">畫面自訂</span>
+      </button>
+
+      <!-- 個人登島頭像按鈕 -->
+      <button id="my-avatar-btn" class="toy-btn bg-gradient-to-r from-clay-teal to-teal-600 text-white px-3.5 py-2 rounded-2xl flex items-center gap-2 font-bold text-sm shadow-md">
+        <span id="player-avatar-badge" class="w-6 h-6 rounded-full bg-amber-300 text-clay-slate flex items-center justify-center text-xs">🦊</span>
+        <span id="player-name-label">小狐狸學友</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- 左側快速導覽與視角控制 (島嶼專欄切換) -->
+  <aside class="absolute left-4 top-24 bottom-24 z-10 flex flex-col justify-between pointer-events-none">
+    <!-- 島嶼專欄快捷跳轉 -->
+    <div class="pointer-events-auto bg-white/85 backdrop-blur-md p-2 rounded-3xl border-2 border-amber-100/70 shadow-xl flex flex-col gap-2 max-w-[210px]">
+      <div class="px-2 pt-1 pb-1 border-b border-stone-200/60 flex items-center justify-between">
+        <span class="text-[11px] font-extrabold uppercase tracking-wider text-stone-600"><i class="fa-solid fa-map-location-dot mr-1 text-clay-teal"></i>六角專欄島群</span>
+        <span class="text-[10px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded-full font-bold">5 座島</span>
+      </div>
+      <div id="islands-nav-list" class="space-y-1">
+        <!-- JS 動態生成按鈕 -->
+      </div>
+    </div>
+
+    <!-- 視角視角重置與提示 -->
+    <div class="pointer-events-auto bg-white/85 backdrop-blur-md p-2.5 rounded-2xl border border-stone-200/80 shadow-md text-xs space-y-1.5 w-[190px]">
+      <div class="flex items-center gap-1.5 text-stone-700 font-bold">
+        <i class="fa-solid fa-hand-pointer text-clay-gold"></i>
+        <span>漫遊島嶼操作</span>
+      </div>
+      <p class="text-[11px] text-stone-600 leading-tight">
+        • 拖曳滑鼠旋轉模型視角<br>
+        • 點擊島嶼可登島探索專欄<br>
+        • 滾輪縮放微縮景深細節
+      </p>
+      <div class="flex gap-1.5 pt-1">
+        <button id="reset-cam-btn" class="flex-1 text-center py-1 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg text-[11px] font-semibold transition">
+          <i class="fa-solid fa-rotate-left mr-0.5"></i>鳥瞰
+        </button>
+        <button id="quick-add-island-btn" class="flex-1 text-center py-1 bg-amber-100 hover:bg-amber-200 text-amber-900 rounded-lg text-[11px] font-bold transition">
+          <i class="fa-solid fa-plus mr-0.5"></i>建島
+        </button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============================================== -->
+  <!-- MODAL / DRAWER: 畫面自訂工作台 (Island Studio)  -->
+  <!-- ============================================== -->
+  <div id="studio-drawer" class="fixed top-20 right-4 bottom-24 z-30 w-80 max-w-[calc(100vw-32px)] toy-panel p-4 shadow-2xl flex flex-col gap-3.5 transform translate-x-[120%] transition-transform duration-300 pointer-events-auto">
+    <div class="flex items-center justify-between border-b border-stone-200 pb-2.5">
+      <div class="flex items-center gap-2">
+        <div class="w-7 h-7 rounded-lg bg-amber-400 text-stone-900 flex items-center justify-center font-black text-sm">
+          <i class="fa-solid fa-sliders"></i>
+        </div>
+        <h3 class="font-toy text-base font-extrabold text-stone-800">島嶼造景工作室</h3>
+      </div>
+      <button id="close-studio-btn" class="w-7 h-7 rounded-full bg-stone-100 hover:bg-stone-200 text-stone-500 flex items-center justify-center text-sm transition">
+        <i class="fa-solid fa-xmark"></i>
+      </button>
+    </div>
+
+    <div class="overflow-y-auto space-y-4 no-scrollbar pr-1 flex-1 text-xs">
+      <!-- 1. 時段氛圍切換 -->
+      <div class="space-y-1.5">
+        <label class="font-extrabold text-stone-700 flex items-center gap-1.5">
+          <i class="fa-solid fa-sun text-amber-500"></i> 時段光影氛圍
+        </label>
+        <div class="grid grid-cols-2 gap-1.5" id="atmosphere-selector">
+          <button data-sky="day" class="sky-btn active px-2.5 py-2 rounded-xl border-2 border-amber-400 bg-amber-50 font-bold flex items-center gap-1.5 text-stone-800">
+            <span>☀️</span> 晴空日光
+          </button>
+          <button data-sky="sunset" class="sky-btn px-2.5 py-2 rounded-xl border border-stone-200 bg-white hover:bg-stone-50 font-bold flex items-center gap-1.5 text-stone-700">
+            <span>🌅</span> 暖橘黃昏
+          </button>
+          <button data-sky="night" class="sky-btn px-2.5 py-2 rounded-xl border border-stone-200 bg-white hover:bg-stone-50 font-bold flex items-center gap-1.5 text-stone-700">
+            <span>🌙</span> 星光午夜
+          </button>
+          <button data-sky="mist" class="sky-btn px-2.5 py-2 rounded-xl border border-stone-200 bg-white hover:bg-stone-50 font-bold flex items-center gap-1.5 text-stone-700">
+            <span>☁️</span> 莫蘭迪霧
+          </button>
+        </div>
+      </div>
+
+      <!-- 2. 微縮玩具模型質感調配 -->
+      <div class="space-y-2 border-t border-stone-100 pt-3">
+        <label class="font-extrabold text-stone-700 flex items-center justify-between">
+          <span class="flex items-center gap-1.5"><i class="fa-solid fa-cubes text-clay-teal"></i> 微縮模型景深效果</span>
+          <input type="checkbox" id="tilt-shift-toggle" checked class="accent-teal-600 rounded cursor-pointer w-4 h-4">
+        </label>
+        <p class="text-[10px] text-stone-500">開啟移軸微縮上下模糊，重現像桌上手辦公仔般的景深焦點。</p>
+      </div>
+
+      <!-- 3. 島嶼地表整體色盤 -->
+      <div class="space-y-2 border-t border-stone-100 pt-3">
+        <label class="font-extrabold text-stone-700 flex items-center gap-1.5">
+          <i class="fa-solid fa-paintbrush text-clay-terracotta"></i> 聚落色彩主題
+        </label>
+        <div class="grid grid-cols-3 gap-1.5" id="island-palette-selector">
+          <button data-palette="candy" class="pal-btn active px-2 py-1.5 rounded-xl border-2 border-stone-800 bg-amber-50 font-bold text-[11px] text-stone-800">
+            🍬 糖果玩具
+          </button>
+          <button data-palette="pastel" class="pal-btn px-2 py-1.5 rounded-xl border border-stone-200 bg-white font-bold text-[11px] text-stone-700">
+            🌿 抹茶大地
+          </button>
+          <button data-palette="cyber" class="pal-btn px-2 py-1.5 rounded-xl border border-stone-200 bg-white font-bold text-[11px] text-stone-700">
+            ⚡ 霓虹微縮
+          </button>
+        </div>
+      </div>
+
+      <!-- 4. 島嶼高低起伏與海洋調整 -->
+      <div class="space-y-3 border-t border-stone-100 pt-3">
+        <div>
+          <div class="flex justify-between text-stone-600 font-bold text-[11px] mb-1">
+            <span>島嶼高低落差比率</span>
+            <span id="height-val-label">1.0x</span>
+          </div>
+          <input type="range" id="island-height-slider" min="0.5" max="2.2" step="0.1" value="1.0" class="w-full accent-clay-teal cursor-pointer">
+        </div>
+        <div>
+          <div class="flex justify-between text-stone-600 font-bold text-[11px] mb-1">
+            <span>雲朵繞行公轉速度</span>
+            <span id="cloud-speed-label">正常</span>
+          </div>
+          <input type="range" id="cloud-speed-slider" min="0" max="3" step="0.5" value="1" class="w-full accent-amber-500 cursor-pointer">
+        </div>
+      </div>
+
+      <!-- 5. 擴建全新六角專欄島 -->
+      <div class="space-y-2 border-t border-stone-100 pt-3">
+        <label class="font-extrabold text-stone-700 flex items-center gap-1.5">
+          <i class="fa-solid fa-hammer text-amber-600"></i> 開闢自訂專欄島
+        </label>
+        <input type="text" id="new-island-name" placeholder="輸入專欄島嶼名稱 (如: 數據魔法島)" maxlength="10" class="w-full px-2.5 py-1.5 text-xs rounded-xl border border-stone-200 focus:outline-none focus:ring-1 focus:ring-clay-teal">
+        <div class="flex gap-2">
+          <select id="new-island-icon" class="px-2 py-1 text-xs rounded-xl border border-stone-200 bg-white">
+            <option value="🚀">🚀 探索</option>
+            <option value="🧪">🧪 實驗</option>
+            <option value="🎯">🎯 專注</option>
+            <option value="🌱">🌱 成長</option>
+            <option value="🎮">🎮 遊戲</option>
+          </select>
+          <input type="color" id="new-island-color" value="#5B8FF9" class="w-10 h-8 p-0.5 rounded-xl border border-stone-200 cursor-pointer">
+          <button id="add-custom-island-btn" class="toy-btn flex-1 bg-clay-teal hover:bg-teal-700 text-white font-bold rounded-xl text-xs">
+            建造並降落
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 移軸鏡頭微縮景深疊加層 (Tilt-Shift Overlay) -->
+  <div id="tilt-shift-layer" class="pointer-events-none fixed inset-0 z-10 transition-opacity duration-300" style="backdrop-filter: blur(0px); mask-image: linear-gradient(to bottom, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0) 25%, rgba(0,0,0,0) 75%, rgba(0,0,0,0.85) 100%); -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0) 25%, rgba(0,0,0,0) 75%, rgba(0,0,0,0.85) 100%); backdrop-filter: blur(4px);"></div>
+
+  <!-- 右下角：番茄鐘專注自習小公仔 -->
+  <div class="absolute bottom-6 right-6 z-20 pointer-events-auto flex flex-col items-end gap-3">
+    <!-- 縮小/展開型番茄鐘迷你模組 -->
+    <div id="pomodoro-box" class="bg-white/95 backdrop-blur-md p-3 rounded-3xl border-2 border-amber-100 shadow-xl flex items-center gap-3 transition-all">
+      <div class="w-10 h-10 rounded-2xl bg-amber-100 text-amber-600 flex items-center justify-center font-bold text-lg">
+        <i class="fa-solid fa-hourglass-half animate-spin" style="animation-duration: 9s;"></i>
+      </div>
+      <div>
+        <div class="flex items-center gap-2">
+          <span class="text-xs font-bold text-stone-500 uppercase">島民共學番茄鐘</span>
+          <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+        </div>
+        <div class="flex items-center gap-2">
+          <span id="timer-display" class="font-toy text-xl font-bold text-stone-800 tracking-wider">25:00</span>
+          <button id="timer-toggle-btn" class="toy-btn px-2.5 py-1 bg-clay-teal hover:bg-teal-700 text-white rounded-xl text-xs font-bold">
+            <i class="fa-solid fa-play mr-1"></i>開始專注
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 底部中央提示：目前選中島嶼速報 -->
+  <div id="island-quick-bar" class="absolute bottom-6 left-1/2 -translate-x-1/2 z-10 pointer-events-none transition-all duration-300 transform opacity-0 translate-y-4">
+    <div class="pointer-events-auto bg-stone-900/80 text-white backdrop-blur-md px-5 py-2.5 rounded-full flex items-center gap-3 shadow-2xl border border-white/20">
+      <span id="quick-bar-icon" class="text-xl">🏝️</span>
+      <div>
+        <span id="quick-bar-title" class="font-bold text-sm">點擊島嶼</span>
+        <span class="text-xs text-stone-300 ml-2" id="quick-bar-sub">點擊查看此專欄精選文章與共筆</span>
+      </div>
+      <button id="quick-bar-enter-btn" class="toy-btn ml-2 bg-clay-gold hover:bg-amber-400 text-stone-900 font-extrabold text-xs px-3 py-1.5 rounded-full flex items-center gap-1">
+        <span>閱讀專欄</span>
+        <i class="fa-solid fa-arrow-right"></i>
+      </button>
+    </div>
+  </div>
+
+  <!-- ============================================== -->
+  <!-- MODAL 1: 專欄島嶼詳細內容與共同學習便利貼互動 -->
+  <!-- ============================================== -->
+  <div id="island-modal" class="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/40 backdrop-blur-sm opacity-0 pointer-events-none transition-opacity duration-300">
+    <div class="toy-panel w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden shadow-2xl relative transform scale-95 transition-transform duration-300" id="island-modal-card">
+      
+      <!-- 頂部橫幅 (具島嶼代表色背景) -->
+      <div id="modal-header-bg" class="px-6 py-5 bg-gradient-to-r from-teal-500 to-emerald-500 text-white flex items-center justify-between relative overflow-hidden">
+        <!-- 裝飾微縮幾何背景紋理 -->
+        <div class="absolute -right-6 -bottom-8 text-white/10 text-9xl font-black select-none pointer-events-none">
+          <i class="fa-solid fa-cube"></i>
+        </div>
+
+        <div class="flex items-center gap-4 relative z-10">
+          <div id="modal-island-icon-box" class="w-14 h-14 rounded-2xl bg-white/20 border-2 border-white/40 flex items-center justify-center text-3xl shadow-md">
+            💻
+          </div>
+          <div>
+            <div class="flex items-center gap-2">
+              <span id="modal-island-tag" class="text-[11px] font-bold uppercase bg-black/20 px-2 py-0.5 rounded-md text-amber-200">專欄島嶼 #01</span>
+              <span class="text-xs text-white/80 flex items-center gap-1"><i class="fa-solid fa-user-group text-[10px]"></i> <span id="modal-island-studying-count">5 人在此島自習</span></span>
+            </div>
+            <h2 id="modal-island-title" class="text-2xl font-black text-white font-toy tracking-wide">學生住宿服務中心 Housing Center</h2>
+          </div>
+        </div>
+
+        <!-- 關閉按鈕 -->
+        <button id="close-modal-btn" class="w-10 h-10 rounded-full bg-white/20 hover:bg-white/40 text-white flex items-center justify-center text-lg transition z-10">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <!-- 內容標籤頁切換：精選專欄文章 vs 即時共筆靈感便利貼 -->
+      <div class="flex border-b border-stone-200 bg-amber-50/50 px-6 gap-6 text-sm font-bold">
+        <button id="tab-btn-articles" class="py-3 text-clay-teal border-b-2 border-clay-teal flex items-center gap-2">
+          <i class="fa-solid fa-newspaper"></i>
+          <span>精選專欄文章 (<span id="modal-article-count">3</span>)</span>
+        </button>
+        <button id="tab-btn-stickies" class="py-3 text-stone-500 hover:text-stone-700 flex items-center gap-2">
+          <i class="fa-solid fa-note-sticky text-amber-500"></i>
+          <span>島民學習便箋牆 (<span id="modal-sticky-count">4</span>)</span>
+        </button>
+      </div>
+
+      <!-- 滾動內容本體 -->
+      <div class="p-6 overflow-y-auto space-y-6 flex-1 no-scrollbar bg-clay-paper">
+        
+        <!-- 文章專區 TAB -->
+        <div id="tab-content-articles" class="space-y-4">
+          <p id="modal-island-desc" class="text-stone-600 text-sm leading-relaxed bg-white p-4 rounded-2xl border border-stone-200 shadow-sm">
+            這裡是由程式拓荒者所駐紮的小島，專注於現代前端架構、WebGL 視覺特效與極致使用者體驗的心得交流。
+          </p>
+
+          <h3 class="font-extrabold text-stone-800 text-sm flex items-center gap-2 mt-4">
+            <i class="fa-solid fa-bookmark text-clay-terracotta"></i> 本期島主精選文章
+          </h3>
+
+          <div id="modal-articles-list" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <!-- JS 動態填入文章卡片 -->
+          </div>
+        </div>
+
+        <!-- 共同學習便利貼 TAB -->
+        <div id="tab-content-stickies" class="hidden space-y-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <h4 class="font-extrabold text-stone-800 text-sm">島民隨筆即時牆</h4>
+              <p class="text-xs text-stone-500">留下你今天學到的新知識、心得或給島友的提問吧！</p>
+            </div>
+            <button id="open-sticky-form-btn" class="toy-btn px-3.5 py-1.5 bg-clay-gold hover:bg-amber-400 text-stone-900 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm">
+              <i class="fa-solid fa-plus"></i>
+              <span>貼上心得便利貼</span>
+            </button>
+          </div>
+
+          <!-- 新增便利貼輸入區塊 (默認收合) -->
+          <div id="sticky-create-box" class="hidden bg-amber-100/70 p-4 rounded-2xl border-2 border-amber-300 space-y-3">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-amber-900"><i class="fa-solid fa-feather mr-1"></i>分享一句今日收穫</span>
+              <div class="flex gap-2" id="sticky-color-picker">
+                <button data-color="yellow" class="w-5 h-5 rounded-full bg-amber-300 ring-2 ring-stone-700"></button>
+                <button data-color="pink" class="w-5 h-5 rounded-full bg-rose-300"></button>
+                <button data-color="blue" class="w-5 h-5 rounded-full bg-sky-300"></button>
+                <button data-color="green" class="w-5 h-5 rounded-full bg-emerald-300"></button>
+              </div>
+            </div>
+            <textarea id="sticky-input-text" rows="2" placeholder="例如：今天搞懂了 Three.js 的正交相機與透視相機差別，太好玩了！" class="w-full text-xs p-2.5 rounded-xl border border-amber-300 focus:outline-none focus:ring-2 focus:ring-amber-500 bg-white/90"></textarea>
+            <div class="flex justify-end gap-2">
+              <button id="cancel-sticky-btn" class="px-3 py-1 text-xs font-bold text-stone-600 hover:text-stone-800">取消</button>
+              <button id="submit-sticky-btn" class="toy-btn px-4 py-1.5 bg-clay-teal text-white text-xs font-bold rounded-xl">發佈到島上</button>
+            </div>
+          </div>
+
+          <!-- 便箋網格 -->
+          <div id="modal-stickies-grid" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 pt-2">
+            <!-- JS 動態填入便利貼 -->
+          </div>
+        </div>
+
+      </div>
+
+      <!-- 底部操作列：島上打卡自習 -->
+      <div class="px-6 py-4 bg-white border-t border-stone-200 flex flex-wrap items-center justify-between gap-3">
+        <div class="flex items-center gap-2">
+          <div class="w-3 h-3 rounded-full bg-emerald-500 animate-pulse"></div>
+          <span class="text-xs text-stone-600">在此島自習能為你的小島解鎖專屬徽章！</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="cheer-island-btn" class="toy-btn px-4 py-2 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 text-xs font-extrabold rounded-2xl flex items-center gap-1.5">
+            <span id="island-cheer-icon">👏</span>
+            <span>為島嶼鼓掌 (<span id="modal-cheer-count">128</span>)</span>
+          </button>
+          <button id="teleport-here-btn" class="toy-btn px-4 py-2 bg-gradient-to-r from-clay-teal to-teal-700 text-white text-xs font-extrabold rounded-2xl flex items-center gap-1.5 shadow-md">
+            <i class="fa-solid fa-location-crosshairs"></i>
+            <span>降落在此島自習</span>
+          </button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ============================================== -->
+  <!-- MODAL 2: 個人登島檔案與自訂化身 (Toy Avatar)   -->
+  <!-- ============================================== -->
+  <div id="profile-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm opacity-0 pointer-events-none transition-opacity duration-300">
+    <div class="toy-panel w-full max-w-md p-6 shadow-2xl relative transform scale-95 transition-transform duration-300" id="profile-modal-card">
+      <div class="flex justify-between items-center mb-4">
+        <h3 class="font-toy text-xl font-bold text-stone-800 flex items-center gap-2">
+          <i class="fa-solid fa-id-card text-clay-teal"></i>
+          <span>島民通行證裝扮</span>
+        </h3>
+        <button id="close-profile-btn" class="text-stone-400 hover:text-stone-600 text-lg">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <div class="space-y-4">
+        <!-- 化身造型選擇器 -->
+        <div>
+          <label class="text-xs font-bold text-stone-600 block mb-2">挑選你的玩具黏土公仔造型：</label>
+          <div class="grid grid-cols-5 gap-2" id="avatar-options">
+            <button data-avatar="🦊" class="avatar-opt p-2.5 text-2xl rounded-2xl bg-amber-100 border-2 border-amber-400 flex items-center justify-center hover:scale-105 transition">🦊</button>
+            <button data-avatar="🐼" class="avatar-opt p-2.5 text-2xl rounded-2xl bg-stone-100 border-2 border-stone-200 flex items-center justify-center hover:scale-105 transition">🐼</button>
+            <button data-avatar="🐸" class="avatar-opt p-2.5 text-2xl rounded-2xl bg-stone-100 border-2 border-stone-200 flex items-center justify-center hover:scale-105 transition">🐸</button>
+            <button data-avatar="🤖" class="avatar-opt p-2.5 text-2xl rounded-2xl bg-stone-100 border-2 border-stone-200 flex items-center justify-center hover:scale-105 transition">🤖</button>
+            <button data-avatar="🧙‍♂️" class="avatar-opt p-2.5 text-2xl rounded-2xl bg-stone-100 border-2 border-stone-200 flex items-center justify-center hover:scale-105 transition">🧙‍♂️</button>
+          </div>
+        </div>
+
+        <!-- 稱號與暱稱 -->
+        <div>
+          <label class="text-xs font-bold text-stone-600 block mb-1">島民暱稱：</label>
+          <input type="text" id="player-nickname-input" value="小狐狸學友" maxlength="12" class="w-full text-sm font-bold px-3 py-2 rounded-xl border border-stone-300 focus:outline-none focus:ring-2 focus:ring-clay-teal">
+        </div>
+
+        <!-- 雲端使用者識別碼 (供多人辨識) -->
+        <div class="bg-stone-50 p-2.5 rounded-xl border border-stone-200 text-[11px] text-stone-500 flex items-center justify-between">
+          <span class="font-bold text-stone-600">連線通行證 ID:</span>
+          <span id="player-cloud-id" class="font-mono text-stone-500 truncate max-w-[200px]">本地安全儲存</span>
+        </div>
+
+        <!-- 學習座右銘 -->
+        <div>
+          <label class="text-xs font-bold text-stone-600 block mb-1">今日自習狀態 / 宣言：</label>
+          <input type="text" id="player-status-input" value="正在閱讀 AI 提示詞架構 ☕" maxlength="24" class="w-full text-xs px-3 py-2 rounded-xl border border-stone-300 focus:outline-none focus:ring-2 focus:ring-clay-teal">
+        </div>
+
+        <!-- 學習成就數值 -->
+        <div class="bg-amber-50/80 p-3 rounded-2xl border border-amber-200 flex justify-around text-center">
+          <div>
+            <div class="text-xs text-stone-500 font-medium">累積登島</div>
+            <div class="text-base font-extrabold text-clay-teal font-toy">12 天</div>
+          </div>
+          <div class="border-r border-amber-200"></div>
+          <div>
+            <div class="text-xs text-stone-500 font-medium">收集心得</div>
+            <div class="text-base font-extrabold text-clay-gold font-toy">34 則</div>
+          </div>
+          <div class="border-r border-amber-200"></div>
+          <div>
+            <div class="text-xs text-stone-500 font-medium">專注分鐘</div>
+            <div class="text-base font-extrabold text-clay-terracotta font-toy">185 m</div>
+          </div>
+        </div>
+
+        <button id="save-profile-btn" class="toy-btn w-full py-2.5 bg-clay-teal hover:bg-teal-700 text-white font-bold text-sm rounded-2xl shadow-md">
+          更新通行證並巡航
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================== -->
+  <!-- MODAL 3: 雲端同步與資料儲存設定 (Storage Hub)  -->
+  <!-- ============================================== -->
+  <div id="cloud-config-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm opacity-0 pointer-events-none transition-opacity duration-300">
+    <div class="toy-panel w-full max-w-lg p-6 shadow-2xl relative transform scale-95 transition-transform duration-300" id="cloud-config-modal-card">
+      <div class="flex justify-between items-center mb-3 pb-2 border-b border-stone-200">
+        <div class="flex items-center gap-2">
+          <div class="w-8 h-8 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold">
+            <i class="fa-solid fa-database"></i>
+          </div>
+          <h3 class="font-toy text-lg font-bold text-stone-800">資料儲存與連線中心</h3>
+        </div>
+        <button id="close-cloud-config-btn" class="text-stone-400 hover:text-stone-600 text-lg">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <div class="space-y-4 text-xs">
+        <!-- 狀態說明卡 -->
+        <div class="p-3 rounded-2xl bg-stone-50 border border-stone-200 flex items-start gap-3">
+          <div class="text-xl pt-0.5">💾</div>
+          <div class="flex-1">
+            <h4 class="font-bold text-stone-800 mb-0.5">本機自動永久保存已啟動 (IndexedDB)</h4>
+            <p class="text-stone-600 leading-relaxed">
+              您在此瀏覽器寫下的心得便利貼、開闢的島嶼均已永久儲存在您的電腦/手機中，<strong>重新整理或關閉網頁資料都不會遺失</strong>。
+            </p>
+          </div>
+        </div>
+
+        <!-- 升級雲端跨裝置同步設定 -->
+        <div class="space-y-2 border-t border-stone-100 pt-3">
+          <div class="flex items-center justify-between">
+            <label class="font-extrabold text-stone-700 flex items-center gap-1.5">
+              <i class="fa-solid fa-cloud-arrow-up text-clay-teal"></i> 啟用多人跨裝置即時同步 (Firebase)
+            </label>
+            <span class="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-bold">選填</span>
+          </div>
+          <p class="text-stone-500 text-[11px] leading-relaxed">
+            如需讓全校同學在各自手機與電腦即時看到彼此的便利貼與在線小人偶，請在此貼上 Firebase 專案設定 JSON：
+          </p>
+          <textarea id="firebase-config-input" rows="4" placeholder='{"apiKey": "AIzaSy...", "authDomain": "...", "projectId": "..."}' class="w-full font-mono text-[11px] p-2.5 rounded-xl border border-stone-300 focus:outline-none focus:ring-2 focus:ring-clay-teal bg-white"></textarea>
+          <div class="flex justify-between items-center pt-1">
+            <button id="clear-local-stickies-btn" class="text-rose-600 hover:text-rose-700 font-bold text-[11px]">
+              <i class="fa-regular fa-trash-can mr-1"></i>清除本機便利貼
+            </button>
+            <button id="save-firebase-config-btn" class="toy-btn px-4 py-2 bg-clay-teal hover:bg-teal-700 text-white font-bold rounded-xl text-xs">
+              連接並切換雲端同步
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 浮動訊息通知 Toast -->
+  <div id="toast-message" class="fixed top-20 left-1/2 -translate-x-1/2 z-50 pointer-events-none transition-all duration-300 opacity-0 -translate-y-4">
+    <div class="bg-stone-800 text-white px-5 py-2.5 rounded-full text-xs font-bold shadow-2xl flex items-center gap-2 border border-white/20">
+      <i class="fa-solid fa-circle-check text-emerald-400" id="toast-icon"></i>
+      <span id="toast-text">通知內容</span>
+    </div>
+  </div>
+
+  <!-- ======================================================== -->
+  <!-- 核心 JavaScript: Three.js 3D 模擬微縮城市 + 學習專欄互動系統 -->
+  <!-- ======================================================== -->
+  <script>
+    /* ----------------------------------------------------
+       1. 資料模型：五大專欄六角島嶼定義
+       ---------------------------------------------------- */
+    const ISLAND_COLUMNS = [
+      {
+        id: 'code-island',
+        name: '學生住宿服務中心',
+        enName: 'Housing Service Center',
+        category: '宿舍行政與生活導覽',
+        icon: '🏢',
+        emoji: '🔑',
+        themeColor: 0x4E9F9D, // 藍綠玩具色
+        accentHex: '#4E9F9D',
+        headerGrad: 'from-teal-600 to-cyan-700',
+        hexCoord: { q: 0, r: 0 }, // 中心主島
+        height: 1.4,
+        description: '全校住宿生的後盾！提供進住登記、修繕申請、生活諮詢與公共學習資源導引。',
+        stats: { learners: 8, cheers: 342 },
+        articles: [
+          {
+            title: '115 學年度宿舍進住指南：生活用品清單與網路設定教學',
+            readTime: '5 分鐘閱讀',
+            tag: '入宿必讀',
+            author: '住服組小編',
+            excerpt: '迎接新學期！手把手帶你完成寢室門禁卡開通、學術網路連線與公共洗衣房使用規範。'
+          },
+          {
+            title: '宿舍節能與公共空間共治倡議：打造低碳舒適微聚落',
+            readTime: '4 分鐘閱讀',
+            tag: '生活公約',
+            author: '住服中心行政室',
+            excerpt: '分享各棟宿舍公共交誼廳認養計畫與節能競賽獲獎心得，讓住校生活更溫馨自律。'
+          },
+          {
+            title: '寢室修繕通報系統使用手冊：常見水電報修小技巧',
+            readTime: '3 分鐘閱讀',
+            tag: '修繕服務',
+            author: '修繕工程小組',
+            excerpt: '水龍頭滲水、冷氣遙控器沒電怎麼辦？線上 3 步驟快速送出維修單與進度追蹤。'
+          }
+        ],
+        stickies: [
+          { author: '小艾', color: 'yellow', text: '今天換發冷氣卡流程好快，櫃台志工很親切！', time: '10分鐘前' },
+          { author: 'Devin', color: 'green', text: '請問大門磁扣如果消磁了，中午時間可以辦理嗎？', time: '1小時前' },
+          { author: '木木', color: 'blue', text: '提醒大家期末宿舍冰箱記得要先清空貼標籤喔～', time: '3小時前' }
+        ]
+      },
+      {
+        id: 'design-island',
+        name: '男一舍',
+        enName: 'Men\'s Dorm 1',
+        category: '活力社群與自主自習',
+        icon: '🏰',
+        emoji: '⚽',
+        themeColor: 0xFFB896,
+        accentHex: '#E26D5C',
+        headerGrad: 'from-rose-500 to-amber-600',
+        hexCoord: { q: 1, r: -1 },
+        height: 1.1,
+        description: '男一舍住宿生活圈！地下交誼廳自習室、運動揪團與夜間考前衝刺討論聚落。',
+        stats: { learners: 5, cheers: 219 },
+        articles: [
+          {
+            title: '男一舍 B1 閱讀自習室升級報告：全區暖光與人體工學椅開箱',
+            readTime: '6 分鐘閱讀',
+            tag: '硬體開箱',
+            author: '男一舍生自治會',
+            excerpt: '為了期中期末考打造的極致沉浸空間，特別增設單人隔板座與插座充足的研討長桌。'
+          },
+          {
+            title: '如何與室友維持四年好交情？男子宿舍溝通與生活節奏調適',
+            readTime: '7 分鐘閱讀',
+            tag: '人際指南',
+            author: '舍長 阿凱',
+            excerpt: '關燈時間、戴耳機習慣、打呼與衛生習慣約定，建立一份專屬你寢的「寢室和平憲法」。'
+          }
+        ],
+        stickies: [
+          { author: 'Nana', color: 'pink', text: '晚上十點交誼廳有人要一起刷演算法題目嗎？', time: '20分鐘前' },
+          { author: 'Leo', color: 'yellow', text: '男一舍二樓曬衣場今天風很大，大家衣服記得夾好！', time: '4小時前' }
+        ]
+      },
+      {
+        id: 'ai-island',
+        name: '女一舍',
+        enName: 'Women\'s Dorm 1',
+        category: '溫馨社群與共學花園',
+        icon: '🌸',
+        emoji: '🪴',
+        themeColor: 0x9370DB,
+        accentHex: '#8A4FFF',
+        headerGrad: 'from-purple-600 to-indigo-700',
+        hexCoord: { q: 1, r: 0 },
+        height: 1.5,
+        description: '女一舍溫暖聚落，擁有香氛閱讀交誼區、共享廚房美食交流與手作自習小天地。',
+        stats: { learners: 11, cheers: 480 },
+        articles: [
+          {
+            title: '女一舍共享簡易廚房指南：電鍋與氣炸鍋的減脂快手料理',
+            readTime: '8 分鐘閱讀',
+            tag: '宿舍食光',
+            author: '烹飪小隊',
+            excerpt: '考試週也能吃的營養又暖胃！精選五道在宿舍交誼廚房 15 分鐘搞定的省時家常食譜。'
+          },
+          {
+            title: '打造治癒系微縮寢室：百元收納與氛圍燈光改造術',
+            readTime: '6 分鐘閱讀',
+            tag: '空間美學',
+            author: 'Sophie',
+            excerpt: '在有限的四人雅房空間裡，善用無痕掛勾、洞洞板與柔和暖光，築起專屬個人的小天地。'
+          }
+        ],
+        stickies: [
+          { author: 'Mark', color: 'blue', text: '女一舍一樓閱覽室新裝了降噪隔音門，讀書超安靜推推！', time: '35分鐘前' },
+          { author: 'Pin', color: 'green', text: '烘衣機零錢常常不足，大家記得多備零錢哦～', time: '2小時前' }
+        ]
+      },
+      {
+        id: 'book-island',
+        name: '學七舍',
+        enName: 'Dorm 7',
+        category: '深度閱讀與研究自習',
+        icon: '📚',
+        emoji: '🌿',
+        themeColor: 0x8CB369,
+        accentHex: '#588157',
+        headerGrad: 'from-emerald-600 to-teal-800',
+        hexCoord: { q: -1, r: 1 },
+        height: 1.2,
+        description: '學七舍書香聚落，環境幽靜宜人，匯聚研究生與自主學習狂熱者，共享讀書會筆記。',
+        stats: { learners: 4, cheers: 195 },
+        articles: [
+          {
+            title: '學七舍共讀會紀要：研究生如何用番茄鐘拆解論文焦慮',
+            readTime: '6 分鐘閱讀',
+            tag: '學術自習',
+            author: 'Reader Kai',
+            excerpt: '每天穩定推進 3 個 25 分鐘番茄鐘，不再被文獻海淹沒的文獻筆記矩陣整理法。'
+          },
+          {
+            title: '夜間安靜自習時段公約：我們如何在七舍享受無干擾時光',
+            readTime: '5 分鐘閱讀',
+            tag: '生活紀律',
+            author: '七舍樓長 墨墨',
+            excerpt: '晚間 11 點後的靜音模式，讓每位需要高專注的同學都能沈浸在思維之流中。'
+          }
+        ],
+        stickies: [
+          { author: '晨曦', color: 'yellow', text: '七舍窗外的綠樹景觀真的很適合邊喝咖啡邊寫論文～', time: '5分鐘前' },
+          { author: 'Clara', color: 'pink', text: '今天在七舍公共閱覽室完成了統計作業，番茄鐘超有用！', time: '1小時前' }
+        ]
+      },
+      {
+        id: 'mind-island',
+        name: '學二舍',
+        enName: 'Dorm 2',
+        category: '生活雜談與跨系共聚',
+        icon: '🏡',
+        emoji: '🛋️',
+        themeColor: 0xF4B246,
+        accentHex: '#F4B246',
+        headerGrad: 'from-amber-500 to-orange-600',
+        hexCoord: { q: -1, r: 0 },
+        height: 1.3,
+        description: '學二舍熱鬧聚會點！跨系交流、二手物交換市集與週末桌遊電影同樂角。',
+        stats: { learners: 6, cheers: 267 },
+        articles: [
+          {
+            title: '學二舍週末二手教材與生活小物漂書市集手冊',
+            readTime: '5 分鐘閱讀',
+            tag: '物資循環',
+            author: 'Sunny',
+            excerpt: '快畢業或換寢換季的同學們，讓用不到的原文書與書桌小家電找到下一位主人！'
+          },
+          {
+            title: '跨系舍友聚在一起聊什麼？從跨領域專題到職涯想像',
+            readTime: '5 分鐘閱讀',
+            tag: '跨界交流',
+            author: '阿徹',
+            excerpt: '文學院遇上資工系的跨界火花，在二舍公共交誼沙發區激盪出的創意靈感。'
+          }
+        ],
+        stickies: [
+          { author: '小島新人', color: 'blue', text: '學二舍一樓這週有辦二手書漂流活動，剛挖到寶！', time: '剛剛' }
+        ]
+      }
+    ];
+
+    // 更新頂部連線狀態徽章
+    window.updateSyncStatusBadge = function(mode) {
+      const badge = document.getElementById('cloud-sync-status');
+      const text = document.getElementById('sync-status-text');
+      if (!badge || !text) return;
+      if (mode === 'cloud') {
+        badge.innerHTML = `
+          <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping"></span>
+          <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 -ml-4"></span>
+          <span class="text-xs font-bold text-emerald-800">雲端多人同步中</span>
+          <i class="fa-solid fa-gear text-emerald-600 text-xs"></i>
+        `;
+      } else {
+        badge.innerHTML = `
+          <span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
+          <span class="text-xs font-bold text-stone-700">本地永久儲存中</span>
+          <i class="fa-solid fa-gear text-stone-400 text-xs"></i>
+        `;
+      }
+    };
+
+    // 本地內存與持久備援結構
+    let inMemoryLocalStickies = [];
+
+    // 從 IndexedDB 恢復本機歷史便利貼
+    window.restorePersistedData = async function() {
+      try {
+        await window.IslandDB.init();
+
+        // 1. 恢復通行證個人資料
+        const savedProfile = await window.IslandDB.getProfile();
+        if (savedProfile) {
+          playerState.name = savedProfile.name || playerState.name;
+          playerState.avatar = savedProfile.avatar || playerState.avatar;
+          playerState.status = savedProfile.status || playerState.status;
+          document.getElementById('player-avatar-badge').innerText = playerState.avatar;
+          document.getElementById('player-name-label').innerText = playerState.name;
+          document.getElementById('player-nickname-input').value = playerState.name;
+          document.getElementById('player-status-input').value = playerState.status;
+        }
+
+        // 2. 恢復所有便利貼
+        const savedStickies = await window.IslandDB.getAllStickies();
+        if (savedStickies && savedStickies.length > 0) {
+          savedStickies.forEach(st => {
+            const island = ISLAND_COLUMNS.find(i => i.id === st.islandId);
+            if (island) {
+              const exists = island.stickies.some(s => s.id === st.id);
+              if (!exists) {
+                island.stickies.unshift(st);
+              }
+            }
+          });
+          console.log(`✅ 已自本機永久儲存庫載入 ${savedStickies.length} 則便利貼！`);
+        }
+      } catch (err) {
+        console.warn('恢復本地資料時遇到狀況：', err);
+      }
+    };
+
+    // 本地玩家狀態
+    let playerState = {
+      name: '小狐狸學友',
+      avatar: '🦊',
+      status: '正在巡航奇想學島 🏝️',
+      currentIslandId: 'code-island',
+      focusMinutes: 185
+    };
+
+    // 其他在線玩家在 3D 空間中的小人偶快取
+    const otherRemotePlayers = {};
+
+    /* ----------------------------------------------------
+       2. Three.js 3D 玩具微縮模型世界建構
+       ---------------------------------------------------- */
+    let scene, camera, renderer;
+    let islandMeshes = []; // 儲存可點選的島嶼群
+    let cloudGroup, windmillBlades = [], waterMesh;
+    let playerPawnMesh; // 代表玩家當前位置的小人偶模型
+    let hemiLight, dirLight, fillLight;
+    let cloudSpeedMultiplier = 1.0;
+    let raycaster, mouse;
+    let isDragging = false;
+    let previousMousePosition = { x: 0, y: 0 };
+    let targetCameraTarget = new THREE.Vector3(0, 0, 0);
+    let cameraTarget = new THREE.Vector3(0, 0, 0);
+
+    // 六角網格幾何參數
+    const HEX_RADIUS = 3.6;
+    const HEX_WIDTH = Math.sqrt(3) * HEX_RADIUS;
+    const HEX_VERT_DIST = HEX_RADIUS * 1.5;
+
+    // 六角座標轉 3D 空間笛卡兒座標
+    function hexToPixel(q, r) {
+      const x = HEX_RADIUS * (Math.sqrt(3) * q + Math.sqrt(3)/2 * r);
+      const z = HEX_RADIUS * (1.5 * r);
+      return { x, z };
+    }
+
+    function init3DWorld() {
+      const container = document.getElementById('canvas-container');
+      const width = container.clientWidth;
+      const height = container.clientHeight;
+
+      // 場景與暖色玩具霧氣（微縮景深感）
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0xA3D8DF); // 水藍天空色
+      scene.fog = new THREE.FogExp2(0xA3D8DF, 0.018);
+
+      // 相機設定：俯瞰角度
+      camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
+      camera.position.set(0, 26, 28);
+      camera.lookAt(0, 0, 0);
+
+      // 渲染器 (支援軟陰影)
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: "high-performance" });
+      renderer.setSize(width, height);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      container.appendChild(renderer.domElement);
+
+      raycaster = new THREE.Raycaster();
+      mouse = new THREE.Vector2();
+
+      // 光照系統：微縮玩具專屬的陽光與溫和環境光
+      setupLighting();
+
+      // 建立海洋底部基座
+      setupOceanBase();
+
+      // 建立五座六角專欄島與裝飾建築
+      setupHexIslands();
+
+      // 建立飄動的玩具雲朵
+      setupToyClouds();
+
+      // 建立玩家小人偶
+      setupPlayerPawn();
+
+      // 事件監聽 (縮放、滑鼠拖曳、點擊)
+      setupInteractionEvents(container);
+
+      // 視窗自適應
+      window.addEventListener('resize', onWindowResize);
+    }
+
+    /* 光照設計：呈現溫暖玩具的高光與飽和感 */
+    function setupLighting() {
+      // 柔和半球環境光 (天空藍 + 大地杏暖)
+      hemiLight = new THREE.HemisphereLight(0xFFF4E0, 0x88A0A8, 0.85);
+      hemiLight.position.set(0, 50, 0);
+      scene.add(hemiLight);
+
+      // 主定向陽光 (產生陰影與立體切面)
+      dirLight = new THREE.DirectionalLight(0xFFF8E7, 1.1);
+      dirLight.position.set(20, 35, 18);
+      dirLight.castShadow = true;
+      dirLight.shadow.mapSize.width = 2048;
+      dirLight.shadow.mapSize.height = 2048;
+      dirLight.shadow.camera.near = 0.5;
+      dirLight.shadow.camera.far = 100;
+      const d = 22;
+      dirLight.shadow.camera.left = -d;
+      dirLight.shadow.camera.right = d;
+      dirLight.shadow.camera.top = d;
+      dirLight.shadow.camera.bottom = -d;
+      dirLight.shadow.bias = -0.0005;
+      scene.add(dirLight);
+
+      // 側邊粉橘微補光
+      fillLight = new THREE.DirectionalLight(0xFFAAA5, 0.35);
+      fillLight.position.set(-20, 15, -15);
+      scene.add(fillLight);
+    }
+
+    /* 時段光影氛圍即時自訂切換 */
+    const ATMOSPHERES = {
+      day: {
+        sky: 0xA3D8DF,
+        fogDensity: 0.018,
+        hemiSky: 0xFFF4E0,
+        hemiGround: 0x88A0A8,
+        hemiIntensity: 0.85,
+        dirColor: 0xFFF8E7,
+        dirIntensity: 1.1,
+        waterColor: 0x56B4C4,
+        bodyBg: '#A3D8DF'
+      },
+      sunset: {
+        sky: 0xFDB89B,
+        fogDensity: 0.022,
+        hemiSky: 0xFFA585,
+        hemiGround: 0x6E4555,
+        hemiIntensity: 0.9,
+        dirColor: 0xFF7A45,
+        dirIntensity: 1.3,
+        waterColor: 0xC46B72,
+        bodyBg: '#FDB89B'
+      },
+      night: {
+        sky: 0x1E2235,
+        fogDensity: 0.024,
+        hemiSky: 0x3D4A7A,
+        hemiGround: 0x0F111A,
+        hemiIntensity: 0.45,
+        dirColor: 0x8DA4D0,
+        dirIntensity: 0.6,
+        waterColor: 0x183059,
+        bodyBg: '#1E2235'
+      },
+      mist: {
+        sky: 0xD0DDD7,
+        fogDensity: 0.032,
+        hemiSky: 0xFAFAFA,
+        hemiGround: 0x9CB0A8,
+        hemiIntensity: 0.8,
+        dirColor: 0xEAEAEA,
+        dirIntensity: 0.7,
+        waterColor: 0x7CA59B,
+        bodyBg: '#D0DDD7'
+      }
+    };
+
+    function applyAtmosphere(key) {
+      const cfg = ATMOSPHERES[key] || ATMOSPHERES.day;
+      scene.background.setHex(cfg.sky);
+      scene.fog.color.setHex(cfg.sky);
+      scene.fog.density = cfg.fogDensity;
+
+      hemiLight.color.setHex(cfg.hemiSky);
+      hemiLight.groundColor.setHex(cfg.hemiGround);
+      hemiLight.intensity = cfg.hemiIntensity;
+
+      dirLight.color.setHex(cfg.dirColor);
+      dirLight.intensity = cfg.dirIntensity;
+
+      if (waterMesh) {
+        waterMesh.material.color.setHex(cfg.waterColor);
+      }
+      document.body.style.backgroundColor = cfg.bodyBg;
+    }
+
+    /* 色彩風格主題更換 */
+    const PALETTES = {
+      candy: [0x4E9F9D, 0xFFB896, 0x9370DB, 0x8CB369, 0xF4B246],
+      pastel: [0xA3B18A, 0xDDA15E, 0xBC6C25, 0x606C38, 0xCCD5AE],
+      cyber: [0x00F0FF, 0xFF007F, 0x7000FF, 0x00FF9F, 0xFFE600]
+    };
+
+    function applyPalette(palKey) {
+      const colors = PALETTES[palKey] || PALETTES.candy;
+      ISLAND_COLUMNS.forEach((island, idx) => {
+        const newColor = colors[idx % colors.length];
+        island.themeColor = newColor;
+        if (island.topMeshRef) {
+          island.topMeshRef.material.color.setHex(newColor);
+        }
+        if (island.groupRef && island.groupRef.userData.beacon) {
+          island.groupRef.userData.beacon.userData.gem.material.color.setHex(newColor);
+        }
+      });
+      showToast(`已套用「${palKey === 'candy' ? '糖果玩具' : palKey === 'pastel' ? '抹茶大地' : '霓虹微縮'}」色盤`, 'fa-palette');
+    }
+
+    function init3DWorld() {
+      const container = document.getElementById('canvas-container');
+      const width = container.clientWidth;
+      const height = container.clientHeight;
+
+      // 場景與暖色玩具霧氣（微縮景深感）
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0xA3D8DF); // 水藍天空色
+      scene.fog = new THREE.FogExp2(0xA3D8DF, 0.018);
+
+      // 相機設定：俯瞰角度
+      camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
+      camera.position.set(0, 26, 28);
+      camera.lookAt(0, 0, 0);
+
+      // 渲染器 (支援軟陰影)
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: "high-performance" });
+      renderer.setSize(width, height);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      container.appendChild(renderer.domElement);
+
+      raycaster = new THREE.Raycaster();
+      mouse = new THREE.Vector2();
+
+      // 光照系統：微縮玩具專屬的陽光與溫和環境光
+      setupLighting();
+
+      // 建立海洋底部基座
+      setupOceanBase();
+
+      // 建立五座六角專欄島與裝飾建築
+      setupHexIslands();
+
+      // 建立飄動的玩具雲朵
+      setupToyClouds();
+
+      // 建立玩家小人偶
+      setupPlayerPawn();
+
+      // 事件監聽 (縮放、滑鼠拖曳、點擊)
+      setupInteractionEvents(container);
+
+      // 視窗自適應
+      window.addEventListener('resize', onWindowResize);
+    }
+
+    /* 光照設計：呈現溫暖玩具的高光與飽和感 */
+    function setupLighting() {
+      // 柔和半球環境光 (天空藍 + 大地杏暖)
+      const hemiLight = new THREE.HemisphereLight(0xFFF4E0, 0x88A0A8, 0.85);
+      hemiLight.position.set(0, 50, 0);
+      scene.add(hemiLight);
+
+      // 主定向陽光 (產生陰影與立體切面)
+      const dirLight = new THREE.DirectionalLight(0xFFF8E7, 1.1);
+      dirLight.position.set(20, 35, 18);
+      dirLight.castShadow = true;
+      dirLight.shadow.mapSize.width = 2048;
+      dirLight.shadow.mapSize.height = 2048;
+      dirLight.shadow.camera.near = 0.5;
+      dirLight.shadow.camera.far = 100;
+      const d = 22;
+      dirLight.shadow.camera.left = -d;
+      dirLight.shadow.camera.right = d;
+      dirLight.shadow.camera.top = d;
+      dirLight.shadow.camera.bottom = -d;
+      dirLight.shadow.bias = -0.0005;
+      scene.add(dirLight);
+
+      // 側邊粉橘微補光
+      const fillLight = new THREE.DirectionalLight(0xFFAAA5, 0.35);
+      fillLight.position.set(-20, 15, -15);
+      scene.add(fillLight);
+    }
+
+    /* 海面基盤 */
+    function setupOceanBase() {
+      // 圓形微縮海盆底座
+      const oceanGeo = new THREE.CylinderGeometry(25, 26, 1.2, 64);
+      const oceanMat = new THREE.MeshLambertMaterial({
+        color: 0x56B4C4,
+        roughness: 0.2
+      });
+      waterMesh = new THREE.Mesh(oceanGeo, oceanMat);
+      waterMesh.position.y = -1.2;
+      waterMesh.receiveShadow = true;
+      scene.add(waterMesh);
+
+      // 玩具海洋浪花同心環
+      const ringGeo = new THREE.RingGeometry(24.5, 25.5, 64);
+      const ringMat = new THREE.MeshBasicMaterial({ color: 0xFFFFFF, transparent: true, opacity: 0.35, side: THREE.DoubleSide });
+      const foam = new THREE.Mesh(ringGeo, ringMat);
+      foam.rotation.x = -Math.PI / 2;
+      foam.position.y = -0.58;
+      scene.add(foam);
+    }
+
+    /* 建立六角柱幾何形狀 (帶圓角微縮立體感) */
+    function createHexPrismGeometry(radius, height) {
+      // 圓柱 6 個邊即是正六角形
+      return new THREE.CylinderGeometry(radius, radius * 1.03, height, 6, 1, false);
+    }
+
+    /* 建置所有島嶼 */
+    function setupHexIslands() {
+      const islandMaterialCache = {};
+
+      ISLAND_COLUMNS.forEach((data, index) => {
+        const islandGroup = new THREE.Group();
+        const pos = hexToPixel(data.hexCoord.q, data.hexCoord.r);
+        islandGroup.position.set(pos.x, 0, pos.z);
+
+        // 1. 六角島岩石底層 (微縮模型泥土剖面)
+        const baseHeight = 2.4;
+        const baseGeo = createHexPrismGeometry(HEX_RADIUS * 0.95, baseHeight);
+        const baseMat = new THREE.MeshLambertMaterial({ color: 0xBA8C63 }); // 暖泥土色
+        const baseMesh = new THREE.Mesh(baseGeo, baseMat);
+        baseMesh.position.y = -baseHeight / 2;
+        baseMesh.receiveShadow = true;
+        baseMesh.castShadow = true;
+        islandGroup.add(baseMesh);
+
+        // 2. 六角島草皮表層 (主要主題色)
+        const topHeight = 0.7;
+        const topGeo = createHexPrismGeometry(HEX_RADIUS, topHeight);
+        const topMat = new THREE.MeshLambertMaterial({
+          color: data.themeColor,
+          roughness: 0.4
+        });
+        const topMesh = new THREE.Mesh(topGeo, topMat);
+        topMesh.position.y = topHeight / 2;
+        topMesh.receiveShadow = true;
+        topMesh.castShadow = true;
+        topMesh.userData = { isIsland: true, islandData: data, group: islandGroup };
+        islandGroup.add(topMesh);
+        data.topMeshRef = topMesh;
+
+        // 存入點擊射線檢測列表
+        islandMeshes.push(topMesh);
+
+        // 3. 各島特色玩具建築模型 (低多邊形微縮造景)
+        buildIslandDiorama(islandGroup, data);
+
+        // 4. 島嶼上方浮動的 Emoji 標籤水晶
+        const beacon = createIslandBeacon(data);
+        beacon.position.y = 4.2;
+        islandGroup.add(beacon);
+        islandGroup.userData.beacon = beacon;
+
+        scene.add(islandGroup);
+        data.groupRef = islandGroup;
+      });
+    }
+
+    /* 動態新增自訂六角專欄島 */
+    function createNewCustomIsland(name, icon, hexColor) {
+      // 尋找未佔用座標 (以中心島擴充)
+      const existingCoords = new Set(ISLAND_COLUMNS.map(i => `${i.hexCoord.q},${i.hexCoord.r}`));
+      const candidateCoords = [
+        { q: 0, r: -1 }, { q: -1, r: -1 }, { q: 2, r: -1 }, { q: 0, r: 1 }, { q: 2, r: 0 }
+      ];
+      let targetCoord = candidateCoords.find(c => !existingCoords.has(`${c.q},${c.r}`));
+      if (!targetCoord) {
+        targetCoord = { q: Math.floor(Math.random() * 3) - 1, r: Math.floor(Math.random() * 3) - 1 };
+      }
+
+      const numColor = parseInt(hexColor.replace('#', '0x'), 16);
+      const newIslandData = {
+        id: `custom-${Date.now()}`,
+        name: name || '新發現專欄島',
+        enName: 'Discovery Isle',
+        category: '社群開闢專欄',
+        icon: icon || '🚀',
+        emoji: '✨',
+        themeColor: numColor,
+        accentHex: hexColor,
+        headerGrad: 'from-amber-600 to-indigo-700',
+        hexCoord: targetCoord,
+        height: 1.3,
+        description: `由島民建造的全新學習領地「${name}」，期待與大家在此共學！`,
+        stats: { learners: 1, cheers: 1 },
+        articles: [
+          {
+            title: `歡迎來到 ${name}！專欄創島首發宣言`,
+            readTime: '3 分鐘閱讀',
+            tag: '創島首篇',
+            author: playerState.name,
+            excerpt: '本島由島民自訂建立，歡迎在此寫下學習筆記與共學心得！'
+          }
+        ],
+        stickies: [
+          { author: playerState.name, color: 'yellow', text: `我在這裡開闢了 ${name}，快來一起學習！`, time: '剛剛' }
+        ]
+      };
+
+      ISLAND_COLUMNS.push(newIslandData);
+
+      // 建立 3D 物件
+      const islandGroup = new THREE.Group();
+      const pos = hexToPixel(newIslandData.hexCoord.q, newIslandData.hexCoord.r);
+      islandGroup.position.set(pos.x, 0, pos.z);
+
+      const baseGeo = createHexPrismGeometry(HEX_RADIUS * 0.95, 2.4);
+      const baseMat = new THREE.MeshLambertMaterial({ color: 0xBA8C63 });
+      const baseMesh = new THREE.Mesh(baseGeo, baseMat);
+      baseMesh.position.y = -1.2;
+      islandGroup.add(baseMesh);
+
+      const topGeo = createHexPrismGeometry(HEX_RADIUS, 0.7);
+      const topMat = new THREE.MeshLambertMaterial({ color: numColor, roughness: 0.4 });
+      const topMesh = new THREE.Mesh(topGeo, topMat);
+      topMesh.position.y = 0.35;
+      topMesh.receiveShadow = true;
+      topMesh.castShadow = true;
+      topMesh.userData = { isIsland: true, islandData: newIslandData, group: islandGroup };
+      islandGroup.add(topMesh);
+      newIslandData.topMeshRef = topMesh;
+      islandMeshes.push(topMesh);
+
+      // 建造自訂造型紀念柱
+      const obeliskGeo = new THREE.CylinderGeometry(0.3, 0.6, 2.2, 5);
+      const obeliskMat = new THREE.MeshLambertMaterial({ color: 0xFFFBF0 });
+      const obelisk = new THREE.Mesh(obeliskGeo, obeliskMat);
+      obelisk.position.y = 1.45;
+      obelisk.castShadow = true;
+      islandGroup.add(obelisk);
+
+      const starGeo = new THREE.DodecahedronGeometry(0.4, 0);
+      const starMat = new THREE.MeshLambertMaterial({ color: numColor });
+      const star = new THREE.Mesh(starGeo, starMat);
+      star.position.y = 2.8;
+      islandGroup.add(star);
+
+      const beacon = createIslandBeacon(newIslandData);
+      beacon.position.y = 4.2;
+      islandGroup.add(beacon);
+      islandGroup.userData.beacon = beacon;
+
+      scene.add(islandGroup);
+      newIslandData.groupRef = islandGroup;
+
+      // 更新側邊列表並降落
+      initNavList();
+      focusIsland(newIslandData);
+      showIslandQuickBar(newIslandData);
+      showToast(`成功開闢「${newIslandData.name}」！`, 'fa-rocket');
+
+      // 同步到雲端
+      if (window.CloudSync && window.CloudSync.isReady) {
+        window.syncIslandToCloud(newIslandData);
+      }
+    }
+
+    /* 為每個島嶼量身打造玩具模型微縮景觀 */
+    function buildIslandDiorama(group, islandData) {
+      const matWood = new THREE.MeshLambertMaterial({ color: 0x965A3E });
+      const matRoof = new THREE.MeshLambertMaterial({ color: 0xE26D5C });
+      const matWhite = new THREE.MeshLambertMaterial({ color: 0xFFFBF0 });
+      const matGold = new THREE.MeshLambertMaterial({ color: 0xF4B246 });
+      const matLeaf = new THREE.MeshLambertMaterial({ color: 0x488B49 });
+      const matDarkLeaf = new THREE.MeshLambertMaterial({ color: 0x2E6B34 });
+
+      // 共用小松樹輔助生成
+      function addToyTree(gx, gz, scale = 1) {
+        const treeGroup = new THREE.Group();
+        // 樹幹
+        const trunkGeo = new THREE.CylinderGeometry(0.12 * scale, 0.16 * scale, 0.7 * scale, 5);
+        const trunk = new THREE.Mesh(trunkGeo, matWood);
+        trunk.position.y = 0.35 * scale;
+        trunk.castShadow = true;
+        treeGroup.add(trunk);
+        // 樹冠圓錐
+        const foliageGeo = new THREE.ConeGeometry(0.7 * scale, 1.4 * scale, 5);
+        const foliage = new THREE.Mesh(foliageGeo, Math.random() > 0.5 ? matLeaf : matDarkLeaf);
+        foliage.position.y = (0.7 + 0.6) * scale;
+        foliage.castShadow = true;
+        treeGroup.add(foliage);
+
+        treeGroup.position.set(gx, 0.4, gz);
+        group.add(treeGroup);
+      }
+
+      // 依專欄主題裝飾不同景觀
+      if (islandData.id === 'code-island') {
+        // [前端島]：中央小燈塔／伺服器塔 + 訊號小圓環
+        const towerGeo = new THREE.CylinderGeometry(0.6, 0.9, 2.5, 6);
+        const tower = new THREE.Mesh(towerGeo, matWhite);
+        tower.position.set(0, 1.6, 0);
+        tower.castShadow = true;
+        group.add(tower);
+
+        const capGeo = new THREE.ConeGeometry(0.7, 0.9, 6);
+        const cap = new THREE.Mesh(capGeo, new THREE.MeshLambertMaterial({ color: 0x3A7D7E }));
+        cap.position.set(0, 3.2, 0);
+        cap.castShadow = true;
+        group.add(cap);
+
+        // 螢光發光核心
+        const coreGeo = new THREE.SphereGeometry(0.25, 8, 8);
+        const coreMat = new THREE.MeshBasicMaterial({ color: 0x76E5FC });
+        const core = new THREE.Mesh(coreGeo, coreMat);
+        core.position.set(0, 2.7, 0);
+        group.add(core);
+
+        addToyTree(-1.5, 1.2, 1.1);
+        addToyTree(1.6, -1.0, 0.9);
+        addToyTree(-1.8, -0.8, 0.8);
+      } 
+      else if (islandData.id === 'design-island') {
+        // [設計島]：調色盤風車 + 幾何積木
+        const millBaseGeo = new THREE.CylinderGeometry(0.7, 0.9, 1.8, 8);
+        const millBase = new THREE.Mesh(millBaseGeo, matWhite);
+        millBase.position.set(-0.2, 1.2, -0.2);
+        millBase.castShadow = true;
+        group.add(millBase);
+
+        const millRoofGeo = new THREE.ConeGeometry(0.85, 0.8, 8);
+        const millRoof = new THREE.Mesh(millRoofGeo, matRoof);
+        millRoof.position.set(-0.2, 2.5, -0.2);
+        group.add(millRoof);
+
+        // 風車旋轉扇葉
+        const bladesGroup = new THREE.Group();
+        bladesGroup.position.set(-0.2, 2.0, 0.7);
+        for (let b = 0; b < 4; b++) {
+          const bladeGeo = new THREE.BoxGeometry(0.18, 1.2, 0.04);
+          const bladeMat = new THREE.MeshLambertMaterial({ color: b % 2 === 0 ? 0xF8C15C : 0xFFFFFF });
+          const blade = new THREE.Mesh(bladeGeo, bladeMat);
+          blade.position.y = 0.6;
+          const bladeArm = new THREE.Group();
+          bladeArm.rotation.z = (Math.PI / 2) * b;
+          bladeArm.add(blade);
+          bladesGroup.add(bladeArm);
+        }
+        group.add(bladesGroup);
+        windmillBlades.push(bladesGroup);
+
+        addToyTree(1.4, 1.2, 1.2);
+        addToyTree(1.8, -0.5, 0.8);
+      }
+      else if (islandData.id === 'ai-island') {
+        // [AI 島]：懸浮科技晶石 + 未來小天線球
+        const crystalGeo = new THREE.OctahedronGeometry(0.9, 0);
+        const crystalMat = new THREE.MeshLambertMaterial({ color: 0xC4B5FD, wireframe: false });
+        const crystal = new THREE.Mesh(crystalGeo, crystalMat);
+        crystal.position.set(0, 2.3, 0);
+        crystal.castShadow = true;
+        group.add(crystal);
+        group.userData.crystal = crystal;
+
+        // 繞轉微衛星小環
+        const ringGeo = new THREE.TorusGeometry(1.4, 0.08, 6, 24);
+        const ringMat = new THREE.MeshBasicMaterial({ color: 0xA78BFA });
+        const ring = new THREE.Mesh(ringGeo, ringMat);
+        ring.rotation.x = Math.PI / 3;
+        ring.position.set(0, 2.3, 0);
+        group.add(ring);
+        group.userData.orbitRing = ring;
+
+        addToyTree(-1.5, 1.0, 1.0);
+        addToyTree(1.4, 1.4, 0.9);
+      }
+      else if (islandData.id === 'book-island') {
+        // [讀書島]：溫馨紅色小木屋 + 圍欄 + 疊放書本造型
+        const cabinGeo = new THREE.BoxGeometry(1.6, 1.2, 1.4);
+        const cabin = new THREE.Mesh(cabinGeo, matWhite);
+        cabin.position.set(0, 1.0, 0);
+        cabin.castShadow = true;
+        group.add(cabin);
+
+        const roofGeo = new THREE.ConeGeometry(1.4, 0.9, 4);
+        const roof = new THREE.Mesh(roofGeo, matRoof);
+        roof.rotation.y = Math.PI / 4;
+        roof.position.set(0, 2.0, 0);
+        roof.castShadow = true;
+        group.add(roof);
+
+        // 小煙囪
+        const chimGeo = new THREE.BoxGeometry(0.3, 0.7, 0.3);
+        const chim = new THREE.Mesh(chimGeo, matWood);
+        chim.position.set(0.5, 2.2, 0.3);
+        group.add(chim);
+
+        addToyTree(-1.5, -0.8, 1.3);
+        addToyTree(1.5, 1.2, 0.9);
+        addToyTree(1.4, -1.2, 1.0);
+      }
+      else if (islandData.id === 'mind-island') {
+        // [雜貨島]：市集小帳棚 + 營火堆
+        const tentGeo = new THREE.ConeGeometry(1.3, 1.6, 5);
+        const tentMat = new THREE.MeshLambertMaterial({ color: 0xF59E0B });
+        const tent = new THREE.Mesh(tentGeo, tentMat);
+        tent.position.set(-0.2, 1.2, 0.2);
+        tent.castShadow = true;
+        group.add(tent);
+
+        // 溫暖小路燈
+        const postGeo = new THREE.CylinderGeometry(0.08, 0.08, 1.8, 6);
+        const post = new THREE.Mesh(postGeo, matWood);
+        post.position.set(1.4, 1.2, -0.6);
+        group.add(post);
+
+        const lanternGeo = new THREE.SphereGeometry(0.28, 6, 6);
+        const lanternMat = new THREE.MeshBasicMaterial({ color: 0xFDE047 });
+        const lantern = new THREE.Mesh(lanternGeo, lanternMat);
+        lantern.position.set(1.4, 2.0, -0.6);
+        group.add(lantern);
+
+        addToyTree(-1.4, -1.2, 1.1);
+        addToyTree(1.2, 1.3, 0.9);
+      }
+    }
+
+    /* 懸浮於島上的旋轉水晶地標 */
+    function createIslandBeacon(islandData) {
+      const group = new THREE.Group();
+      // 八面體旋轉寶石
+      const gemGeo = new THREE.OctahedronGeometry(0.45, 0);
+      const gemMat = new THREE.MeshLambertMaterial({
+        color: islandData.themeColor,
+        emissive: 0x222222,
+        roughness: 0.3
+      });
+      const gem = new THREE.Mesh(gemGeo, gemMat);
+      group.add(gem);
+      group.userData = { gem: gem };
+      return group;
+    }
+
+    /* 玩家自己的 3D 黏土小人偶 (Pawn) */
+    function setupPlayerPawn() {
+      playerPawnMesh = new THREE.Group();
+
+      // 圓滾滾小身體
+      const bodyGeo = new THREE.CylinderGeometry(0.3, 0.45, 0.8, 12);
+      const bodyMat = new THREE.MeshLambertMaterial({ color: 0x3B82F6 });
+      const body = new THREE.Mesh(bodyGeo, bodyMat);
+      body.position.y = 0.4;
+      body.castShadow = true;
+      playerPawnMesh.add(body);
+
+      // 小頭
+      const headGeo = new THREE.SphereGeometry(0.35, 12, 12);
+      const headMat = new THREE.MeshLambertMaterial({ color: 0xFED7AA });
+      const head = new THREE.Mesh(headGeo, headMat);
+      head.position.y = 1.05;
+      head.castShadow = true;
+      playerPawnMesh.add(head);
+
+      // 尖尖小帽子 (代表學習旅人)
+      const hatGeo = new THREE.ConeGeometry(0.32, 0.5, 8);
+      const hatMat = new THREE.MeshLambertMaterial({ color: 0xEF4444 });
+      const hat = new THREE.Mesh(hatGeo, hatMat);
+      hat.position.y = 1.5;
+      hat.rotation.z = -0.15;
+      playerPawnMesh.add(hat);
+
+      // 玩家腳下光圈
+      const haloGeo = new THREE.RingGeometry(0.4, 0.65, 16);
+      const haloMat = new THREE.MeshBasicMaterial({ color: 0x60A5FA, side: THREE.DoubleSide, transparent: true, opacity: 0.8 });
+      const halo = new THREE.Mesh(haloGeo, haloMat);
+      halo.rotation.x = -Math.PI / 2;
+      halo.position.y = 0.05;
+      playerPawnMesh.add(halo);
+
+      // 預設放在主島
+      const startPos = hexToPixel(0, 0);
+      playerPawnMesh.position.set(startPos.x + 0.9, 0.45, startPos.z + 1.2);
+      scene.add(playerPawnMesh);
+    }
+
+    /* 遠端在線同伴的 3D 小人偶建立函式 */
+    function createRemotePlayerPawn(userId, data) {
+      const group = new THREE.Group();
+      const bodyGeo = new THREE.CylinderGeometry(0.28, 0.4, 0.75, 10);
+      const bodyMat = new THREE.MeshLambertMaterial({ color: 0xF59E0B });
+      const body = new THREE.Mesh(bodyGeo, bodyMat);
+      body.position.y = 0.38;
+      group.add(body);
+
+      const headGeo = new THREE.SphereGeometry(0.32, 10, 10);
+      const headMat = new THREE.MeshLambertMaterial({ color: 0xFFE4C4 });
+      const head = new THREE.Mesh(headGeo, headMat);
+      head.position.y = 0.98;
+      group.add(head);
+
+      const hatGeo = new THREE.ConeGeometry(0.28, 0.45, 6);
+      const hatMat = new THREE.MeshLambertMaterial({ color: 0x10B981 });
+      const hat = new THREE.Mesh(hatGeo, hatMat);
+      hat.position.y = 1.38;
+      group.add(hat);
+
+      scene.add(group);
+      otherRemotePlayers[userId] = group;
+      return group;
+    }
+
+    function removeRemotePlayerPawn(userId) {
+      if (otherRemotePlayers[userId]) {
+        scene.remove(otherRemotePlayers[userId]);
+        delete otherRemotePlayers[userId];
+      }
+    }
+
+    /* 玩具棉花糖雲朵群 */
+    function setupToyClouds() {
+      cloudGroup = new THREE.Group();
+      const cloudMat = new THREE.MeshLambertMaterial({
+        color: 0xFFFFFF,
+        roughness: 0.8
+      });
+
+      for (let i = 0; i < 7; i++) {
+        const singleCloud = new THREE.Group();
+        const numPuffs = 4 + Math.floor(Math.random() * 3);
+        for (let p = 0; p < numPuffs; p++) {
+          const puffRadius = 0.9 + Math.random() * 0.8;
+          const puffGeo = new THREE.DodecahedronGeometry(puffRadius, 1);
+          const puff = new THREE.Mesh(puffGeo, cloudMat);
+          puff.position.set((p - 1.5) * 0.9, (Math.random() - 0.5) * 0.4, (Math.random() - 0.5) * 0.5);
+          singleCloud.add(puff);
+        }
+
+        const angle = (i / 7) * Math.PI * 2;
+        const dist = 16 + Math.random() * 8;
+        singleCloud.position.set(Math.cos(angle) * dist, 7 + Math.random() * 4, Math.sin(angle) * dist);
+        singleCloud.userData = { speed: 0.002 + Math.random() * 0.003, distance: dist, angle: angle };
+        cloudGroup.add(singleCloud);
+      }
+      scene.add(cloudGroup);
+    }
+
+    /* ----------------------------------------------------
+       3. 視角旋轉、觸控手勢與點擊互動
+       ---------------------------------------------------- */
+    let startClickTime = 0;
+    let clickStartX = 0, clickStartY = 0;
+
+    function setupInteractionEvents(dom) {
+      // 滑鼠拖曳旋轉島嶼視角
+      dom.addEventListener('mousedown', (e) => {
+        isDragging = true;
+        startClickTime = Date.now();
+        clickStartX = e.clientX;
+        clickStartY = e.clientY;
+        previousMousePosition = { x: e.clientX, y: e.clientY };
+      });
+
+      window.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        const deltaX = e.clientX - previousMousePosition.x;
+        const deltaY = e.clientY - previousMousePosition.y;
+
+        // 以中心為軸心旋轉相機視角
+        const rotSpeed = 0.005;
+        const radius = Math.sqrt(camera.position.x * camera.position.x + camera.position.z * camera.position.z);
+        let angle = Math.atan2(camera.position.z, camera.position.x);
+        angle -= deltaX * rotSpeed;
+
+        camera.position.x = radius * Math.cos(angle);
+        camera.position.z = radius * Math.sin(angle);
+        camera.position.y = Math.max(8, Math.min(42, camera.position.y + deltaY * 0.05));
+        camera.lookAt(cameraTarget);
+
+        previousMousePosition = { x: e.clientX, y: e.clientY };
+      });
+
+      window.addEventListener('mouseup', (e) => {
+        if (!isDragging) return;
+        isDragging = false;
+        
+        // 若移動距離很短且時間短，視為「點擊選島」
+        const distMoved = Math.hypot(e.clientX - clickStartX, e.clientY - clickStartY);
+        if (distMoved < 6 && (Date.now() - startClickTime) < 300) {
+          handleSceneRaycast(e.clientX, e.clientY);
+        }
+      });
+
+      // 支援行動端觸控手勢
+      dom.addEventListener('touchstart', (e) => {
+        if (e.touches.length === 1) {
+          isDragging = true;
+          startClickTime = Date.now();
+          clickStartX = e.touches[0].clientX;
+          clickStartY = e.touches[0].clientY;
+          previousMousePosition = { x: clickStartX, y: clickStartY };
+        }
+      }, { passive: true });
+
+      window.addEventListener('touchmove', (e) => {
+        if (!isDragging || e.touches.length !== 1) return;
+        const clientX = e.touches[0].clientX;
+        const clientY = e.touches[0].clientY;
+        const deltaX = clientX - previousMousePosition.x;
+        const deltaY = clientY - previousMousePosition.y;
+
+        const rotSpeed = 0.007;
+        const radius = Math.sqrt(camera.position.x * camera.position.x + camera.position.z * camera.position.z);
+        let angle = Math.atan2(camera.position.z, camera.position.x);
+        angle -= deltaX * rotSpeed;
+
+        camera.position.x = radius * Math.cos(angle);
+        camera.position.z = radius * Math.sin(angle);
+        camera.position.y = Math.max(8, Math.min(42, camera.position.y + deltaY * 0.06));
+        camera.lookAt(cameraTarget);
+
+        previousMousePosition = { x: clientX, y: clientY };
+      }, { passive: true });
+
+      window.addEventListener('touchend', (e) => {
+        if (!isDragging) return;
+        isDragging = false;
+        if (e.changedTouches.length === 1) {
+          const clientX = e.changedTouches[0].clientX;
+          const clientY = e.changedTouches[0].clientY;
+          const distMoved = Math.hypot(clientX - clickStartX, clientY - clickStartY);
+          if (distMoved < 10 && (Date.now() - startClickTime) < 350) {
+            handleSceneRaycast(clientX, clientY);
+          }
+        }
+      });
+
+      // 滾輪縮放景深
+      dom.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const factor = e.deltaY * 0.02;
+        const currentDist = camera.position.distanceTo(cameraTarget);
+        if ((currentDist > 12 && factor < 0) || (currentDist < 50 && factor > 0)) {
+          camera.position.addScaledVector(camera.position.clone().sub(cameraTarget).normalize(), factor);
+        }
+      }, { passive: false });
+    }
+
+    /* 射線檢測：點擊島嶼觸發事件 */
+    function handleSceneRaycast(screenX, screenY) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      mouse.x = ((screenX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((screenY - rect.top) / rect.height) * 2 + 1;
+
+      raycaster.setFromCamera(mouse, camera);
+      const intersects = raycaster.intersectObjects(islandMeshes, false);
+
+      if (intersects.length > 0) {
+        const hit = intersects[0].object;
+        if (hit.userData && hit.userData.islandData) {
+          const islandData = hit.userData.islandData;
+          playSoftPopSound();
+          focusIsland(islandData);
+          showIslandQuickBar(islandData);
+        }
+      }
+    }
+
+    /* 聚焦選中島嶼 */
+    let activeIsland = null;
+    function focusIsland(islandData) {
+      activeIsland = islandData;
+      playerState.currentIslandId = islandData.id;
+      const targetPos = hexToPixel(islandData.hexCoord.q, islandData.hexCoord.r);
+      targetCameraTarget.set(targetPos.x, 0.5, targetPos.z);
+
+      // 移動玩家人偶登島 (跳躍小動畫)
+      movePawnToIsland(targetPos.x, targetPos.z);
+
+      // 高亮島嶼列表按鈕
+      highlightNavButton(islandData.id);
+
+      // 同步位置到雲端多人
+      if (window.updateMyPresence) {
+        window.updateMyPresence();
+      }
+    }
+
+    /* 小人偶移步動畫 */
+    function movePawnToIsland(tx, tz) {
+      if (!playerPawnMesh) return;
+      const startX = playerPawnMesh.position.x;
+      const startZ = playerPawnMesh.position.z;
+      const destX = tx + 0.8;
+      const destZ = tz + 1.0;
+
+      let step = 0;
+      const totalSteps = 24;
+
+      function hop() {
+        step++;
+        const progress = step / totalSteps;
+        playerPawnMesh.position.x = THREE.MathUtils.lerp(startX, destX, progress);
+        playerPawnMesh.position.z = THREE.MathUtils.lerp(startZ, destZ, progress);
+        // 跳躍拋物線高度
+        playerPawnMesh.position.y = 0.45 + Math.sin(progress * Math.PI) * 1.5;
+
+        if (step < totalSteps) {
+          requestAnimationFrame(hop);
+        } else {
+          playerPawnMesh.position.y = 0.45;
+          showToast(`已降落於「${activeIsland.name}」`, 'fa-compass');
+        }
+      }
+      hop();
+    }
+
+    function onWindowResize() {
+      const container = document.getElementById('canvas-container');
+      if (!container || !renderer || !camera) return;
+      camera.aspect = container.clientWidth / container.clientHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(container.clientWidth, container.clientHeight);
+    }
+
+    /* ----------------------------------------------------
+       4. 3D 動畫循環 (微縮城市動態生命力)
+       ---------------------------------------------------- */
+    let clock = new THREE.Clock();
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const delta = clock.getDelta();
+      const elapsed = clock.getElapsedTime();
+
+      // 平滑相機目標過渡
+      cameraTarget.lerp(targetCameraTarget, 0.08);
+
+      // 1. 水面微幅緩緩起伏
+      if (waterMesh) {
+        waterMesh.rotation.y = elapsed * 0.02;
+      }
+
+      // 2. 風車扇葉旋轉
+      windmillBlades.forEach(blades => {
+        blades.rotation.z += 0.025;
+      });
+
+      // 3. AI 島晶石懸浮旋轉與衛星環自轉
+      ISLAND_COLUMNS.forEach(col => {
+        if (col.groupRef) {
+          if (col.groupRef.userData.crystal) {
+            col.groupRef.userData.crystal.rotation.y += 0.02;
+            col.groupRef.userData.crystal.position.y = 2.3 + Math.sin(elapsed * 2.5) * 0.15;
+          }
+          if (col.groupRef.userData.orbitRing) {
+            col.groupRef.userData.orbitRing.rotation.z += 0.015;
+          }
+          // 島嶼上方水晶地標上下呼吸
+          if (col.groupRef.userData.beacon) {
+            const beacon = col.groupRef.userData.beacon;
+            beacon.userData.gem.rotation.y += 0.03;
+            beacon.position.y = 4.2 + Math.sin(elapsed * 3 + col.hexCoord.q) * 0.2;
+          }
+        }
+      });
+
+      // 4. 玩具棉花雲繞島公轉
+      if (cloudGroup) {
+        cloudGroup.children.forEach(cloud => {
+          cloud.userData.angle += cloud.userData.speed * cloudSpeedMultiplier;
+          cloud.position.x = Math.cos(cloud.userData.angle) * cloud.userData.distance;
+          cloud.position.z = Math.sin(cloud.userData.angle) * cloud.userData.distance;
+        });
+      }
+
+      // 5. 玩家光環微幅呼吸
+      if (playerPawnMesh) {
+        const ring = playerPawnMesh.children[3];
+        if (ring) {
+          const s = 1 + Math.sin(elapsed * 4) * 0.08;
+          ring.scale.set(s, s, s);
+        }
+      }
+
+      renderer.render(scene, camera);
+    }
+
+    /* ----------------------------------------------------
+       5. Tone.js 程式化玩具風微縮環境音效 (無需外連音訊檔)
+       ---------------------------------------------------- */
+    let audioStarted = false;
+    let isMuted = true;
+    let popSynth, breezeNoise, breezeFilter;
+
+    function initAudio() {
+      if (audioStarted) return;
+      try {
+        // 點擊島嶼與操作的清脆軟膠泡泡音
+        popSynth = new Tone.MembraneSynth({
+          pitchDecay: 0.04,
+          octaves: 3,
+          oscillator: { type: "sine" },
+          envelope: { attack: 0.001, decay: 0.18, sustain: 0.01, release: 0.2 }
+        }).toDestination();
+        popSynth.volume.value = -8;
+
+        // 溫暖的海島自然微風音 (粉紅噪音 + 低通濾波器)
+        breezeFilter = new Tone.Filter(350, "lowpass").toDestination();
+        breezeNoise = new Tone.Noise("pink");
+        breezeNoise.connect(breezeFilter);
+        breezeNoise.volume.value = -24;
+
+        audioStarted = true;
+      } catch (err) {
+        console.warn('音訊初始化失敗或被瀏覽器策略封鎖：', err);
+      }
+    }
+
+    function toggleAudio() {
+      initAudio();
+      isMuted = !isMuted;
+      const icon = document.getElementById('sound-icon');
+      const text = document.getElementById('sound-text');
+
+      if (!isMuted) {
+        Tone.start();
+        breezeNoise.start();
+        icon.className = 'fa-solid fa-volume-high text-clay-teal text-base';
+        text.innerText = '微縮風聲播放中';
+        showToast('已開啟島上自習環境音 🍃', 'fa-music');
+      } else {
+        if (breezeNoise) breezeNoise.stop();
+        icon.className = 'fa-solid fa-volume-xmark text-amber-500 text-base';
+        text.innerText = '開啟島上微風音';
+        showToast('已靜音環境音', 'fa-volume-xmark');
+      }
+    }
+
+    function playSoftPopSound() {
+      if (!isMuted && popSynth) {
+        try {
+          popSynth.triggerAttackRelease("C5", "16n");
+        } catch(e){}
+      }
+    }
+
+    /* ----------------------------------------------------
+       6. UI 互動介面邏輯 (側邊欄、專欄模態框、便利貼、番茄鐘)
+       ---------------------------------------------------- */
+    // 初始化側邊島嶼導航
+    function initNavList() {
+      const navList = document.getElementById('islands-nav-list');
+      navList.innerHTML = '';
+
+      ISLAND_COLUMNS.forEach(col => {
+        const btn = document.createElement('button');
+        btn.id = `nav-btn-${col.id}`;
+        btn.className = `w-full text-left px-2.5 py-2 rounded-2xl flex items-center justify-between text-xs font-bold transition-all hover:bg-stone-100 text-stone-700`;
+        btn.innerHTML = `
+          <div class="flex items-center gap-2 truncate">
+            <span class="text-base">${col.icon}</span>
+            <div class="truncate leading-tight">
+              <span class="block truncate text-[11px] font-extrabold">${col.name}</span>
+              <span class="text-[9px] text-stone-600 block">${col.category}</span>
+            </div>
+          </div>
+          <span class="text-[10px] text-stone-600 font-semibold ml-1"><i class="fa-solid fa-user text-[9px] mr-0.5"></i>${col.stats.learners}</span>
+        `;
+        btn.addEventListener('click', () => {
+          playSoftPopSound();
+          focusIsland(col);
+          showIslandQuickBar(col);
+        });
+        navList.appendChild(btn);
+      });
+    }
+
+    function highlightNavButton(islandId) {
+      ISLAND_COLUMNS.forEach(col => {
+        const btn = document.getElementById(`nav-btn-${col.id}`);
+        if (!btn) return;
+        if (col.id === islandId) {
+          btn.className = 'w-full text-left px-2.5 py-2 rounded-2xl flex items-center justify-between text-xs font-bold bg-amber-100/90 text-amber-900 border border-amber-300 shadow-sm';
+        } else {
+          btn.className = 'w-full text-left px-2.5 py-2 rounded-2xl flex items-center justify-between text-xs font-bold transition-all hover:bg-stone-100 text-stone-700';
+        }
+      });
+    }
+
+    // 底部快速提示條
+    function showIslandQuickBar(islandData) {
+      const bar = document.getElementById('island-quick-bar');
+      document.getElementById('quick-bar-icon').innerText = islandData.icon;
+      document.getElementById('quick-bar-title').innerText = `${islandData.name} (${islandData.enName})`;
+      document.getElementById('quick-bar-sub').innerText = `${islandData.stats.learners} 人自習中 • ${islandData.category}`;
+      bar.classList.remove('opacity-0', 'translate-y-4');
+      bar.classList.add('opacity-100', 'translate-y-0');
+    }
+
+    // 打開島嶼專欄詳細彈窗
+    function openIslandModal(islandData) {
+      activeIsland = islandData;
+      const modal = document.getElementById('island-modal');
+      const card = document.getElementById('island-modal-card');
+
+      // 填入資料
+      document.getElementById('modal-header-bg').className = `px-6 py-5 bg-gradient-to-r ${islandData.headerGrad} text-white flex items-center justify-between relative overflow-hidden`;
+      document.getElementById('modal-island-icon-box').innerText = islandData.icon;
+      document.getElementById('modal-island-title').innerText = `${islandData.name} ${islandData.enName}`;
+      document.getElementById('modal-island-desc').innerText = islandData.description;
+      document.getElementById('modal-island-studying-count').innerText = `${islandData.stats.learners} 位島友在此自習`;
+      document.getElementById('modal-cheer-count').innerText = islandData.stats.cheers;
+      document.getElementById('modal-article-count').innerText = islandData.articles.length;
+      document.getElementById('modal-sticky-count').innerText = islandData.stickies.length;
+
+      // 渲染文章列表
+      renderArticles(islandData.articles);
+      // 渲染便利貼牆
+      renderStickies(islandData.stickies);
+
+      // 預設開啟文章標籤
+      switchModalTab('articles');
+
+      modal.classList.remove('opacity-0', 'pointer-events-none');
+      card.classList.remove('scale-95');
+      card.classList.add('scale-100');
+    }
+
+    function closeIslandModal() {
+      const modal = document.getElementById('island-modal');
+      const card = document.getElementById('island-modal-card');
+      modal.classList.add('opacity-0', 'pointer-events-none');
+      card.classList.remove('scale-100');
+      card.classList.add('scale-95');
+    }
+
+    function renderArticles(articles) {
+      const list = document.getElementById('modal-articles-list');
+      list.innerHTML = '';
+
+      articles.forEach((art, idx) => {
+        const item = document.createElement('div');
+        item.className = 'bg-white p-4 rounded-2xl border border-stone-200 shadow-sm hover:shadow-md transition flex flex-col justify-between group cursor-pointer';
+        item.innerHTML = `
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">${art.tag}</span>
+              <span class="text-[11px] text-stone-500"><i class="fa-regular fa-clock mr-1"></i>${art.readTime}</span>
+            </div>
+            <h4 class="font-extrabold text-stone-800 text-sm group-hover:text-clay-teal transition leading-snug mb-2">${art.title}</h4>
+            <p class="text-xs text-stone-500 line-clamp-2 mb-3 leading-relaxed">${art.excerpt}</p>
+          </div>
+          <div class="flex items-center justify-between pt-2 border-t border-stone-100 text-xs">
+            <span class="text-stone-600 font-semibold"><i class="fa-regular fa-user mr-1 text-stone-400"></i>${art.author}</span>
+            <span class="text-clay-teal font-extrabold flex items-center gap-1 group-hover:translate-x-1 transition">
+              閱讀全文 <i class="fa-solid fa-chevron-right text-[10px]"></i>
+            </span>
+          </div>
+        `;
+        item.addEventListener('click', () => {
+          showToast(`已打開專欄文章《${art.title.slice(0, 14)}...》`, 'fa-book-open');
+        });
+        list.appendChild(item);
+      });
+    }
+
+    function renderStickies(stickies) {
+      const grid = document.getElementById('modal-stickies-grid');
+      grid.innerHTML = '';
+
+      const colorMap = {
+        yellow: 'bg-amber-100 border-amber-300 text-amber-950',
+        pink: 'bg-rose-100 border-rose-300 text-rose-950',
+        blue: 'bg-sky-100 border-sky-300 text-sky-950',
+        green: 'bg-emerald-100 border-emerald-300 text-emerald-950'
+      };
+
+      stickies.forEach(st => {
+        const note = document.createElement('div');
+        const colorClass = colorMap[st.color] || colorMap.yellow;
+        note.className = `p-3.5 rounded-2xl border-2 shadow-sm flex flex-col justify-between min-h-[115px] transform rotate-[-0.5deg] hover:rotate-0 hover:scale-[1.02] transition ${colorClass}`;
+        note.innerHTML = `
+          <p class="text-xs font-semibold leading-relaxed mb-2">${st.text}</p>
+          <div class="flex items-center justify-between text-[10px] opacity-75 font-bold pt-1 border-t border-black/10">
+            <span>@${st.author}</span>
+            <span>${st.time}</span>
+          </div>
+        `;
+        grid.appendChild(note);
+      });
+    }
+
+    function switchModalTab(tabName) {
+      const artTab = document.getElementById('tab-btn-articles');
+      const stickyTab = document.getElementById('tab-btn-stickies');
+      const artContent = document.getElementById('tab-content-articles');
+      const stickyContent = document.getElementById('tab-content-stickies');
+
+      if (tabName === 'articles') {
+        artTab.className = 'py-3 text-clay-teal border-b-2 border-clay-teal flex items-center gap-2';
+        stickyTab.className = 'py-3 text-stone-500 hover:text-stone-700 flex items-center gap-2';
+        artContent.classList.remove('hidden');
+        stickyContent.classList.add('hidden');
+      } else {
+        stickyTab.className = 'py-3 text-amber-600 border-b-2 border-amber-500 flex items-center gap-2 font-bold';
+        artTab.className = 'py-3 text-stone-500 hover:text-stone-700 flex items-center gap-2';
+        stickyContent.classList.remove('hidden');
+        artContent.classList.add('hidden');
+      }
+    }
+
+    // 番茄鐘計時器功能
+    let timerInterval = null;
+    let timerSeconds = 25 * 60;
+    let isTimerRunning = false;
+
+    function formatTime(sec) {
+      const m = Math.floor(sec / 60).toString().padStart(2, '0');
+      const s = (sec % 60).toString().padStart(2, '0');
+      return `${m}:${s}`;
+    }
+
+    function toggleTimer() {
+      const btn = document.getElementById('timer-toggle-btn');
+      const display = document.getElementById('timer-display');
+
+      if (!isTimerRunning) {
+        isTimerRunning = true;
+        btn.innerHTML = '<i class="fa-solid fa-pause mr-1"></i>暫停';
+        btn.className = 'toy-btn px-2.5 py-1 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-bold';
+        showToast('專注番茄鐘已啟動，開始與島民沉浸學習！', 'fa-hourglass-start');
+
+        timerInterval = setInterval(() => {
+          if (timerSeconds > 0) {
+            timerSeconds--;
+            display.innerText = formatTime(timerSeconds);
+          } else {
+            clearInterval(timerInterval);
+            isTimerRunning = false;
+            btn.innerHTML = '<i class="fa-solid fa-play mr-1"></i>重新開始';
+            showToast('🎉 太棒了！完成了一輪 25 分鐘專注自習！', 'fa-trophy');
+            timerSeconds = 25 * 60;
+            display.innerText = formatTime(timerSeconds);
+          }
+        }, 1000);
+      } else {
+        clearInterval(timerInterval);
+        isTimerRunning = false;
+        btn.innerHTML = '<i class="fa-solid fa-play mr-1"></i>繼續';
+        btn.className = 'toy-btn px-2.5 py-1 bg-clay-teal hover:bg-teal-700 text-white rounded-xl text-xs font-bold';
+        showToast('計時已暫停', 'fa-pause');
+      }
+    }
+
+    // 彈出 Toast 提示框
+    let toastTimeout;
+    function showToast(msg, iconClass = 'fa-check') {
+      const toast = document.getElementById('toast-message');
+      const text = document.getElementById('toast-text');
+      const icon = document.getElementById('toast-icon');
+
+      text.innerText = msg;
+      icon.className = `fa-solid ${iconClass} text-emerald-400`;
+
+      toast.classList.remove('opacity-0', '-translate-y-4');
+      toast.classList.add('opacity-100', 'translate-y-0');
+
+      clearTimeout(toastTimeout);
+      toastTimeout = setTimeout(() => {
+        toast.classList.remove('opacity-100', 'translate-y-0');
+        toast.classList.add('opacity-0', '-translate-y-4');
+      }, 3000);
+    }
+
+    /* ----------------------------------------------------
+       7. 啟動與所有按鈕監聽綁定
+       ---------------------------------------------------- */
+    window.addEventListener('load', async () => {
+      // 0. 先自 IndexedDB 載入本地永久儲存之貼文與設定
+      await window.restorePersistedData();
+
+      // 1. 初始化 3D 玩具島嶼
+      init3DWorld();
+      animate();
+
+      // 2. 初始化 UI 與專欄列表
+      initNavList();
+
+      // 預設鎖定在中心主島
+      focusIsland(ISLAND_COLUMNS[0]);
+
+      // 聲音切換
+      document.getElementById('sound-btn').addEventListener('click', toggleAudio);
+
+      // 番茄鐘切換
+      document.getElementById('timer-toggle-btn').addEventListener('click', toggleTimer);
+
+      // 鳥瞰視角重置
+      document.getElementById('reset-cam-btn').addEventListener('click', () => {
+        targetCameraTarget.set(0, 0, 0);
+        camera.position.set(0, 26, 28);
+        camera.lookAt(0, 0, 0);
+        playSoftPopSound();
+        showToast('已還原島嶼全景鳥瞰視角 🔭', 'fa-expand');
+      });
+
+      // 底部速報條「閱讀專欄」按鈕
+      document.getElementById('quick-bar-enter-btn').addEventListener('click', () => {
+        if (activeIsland) {
+          openIslandModal(activeIsland);
+        }
+      });
+
+      // 關閉專欄彈窗
+      document.getElementById('close-modal-btn').addEventListener('click', closeIslandModal);
+
+      // 彈窗標籤切換
+      document.getElementById('tab-btn-articles').addEventListener('click', () => switchModalTab('articles'));
+      document.getElementById('tab-btn-stickies').addEventListener('click', () => switchModalTab('stickies'));
+
+      // 為島嶼鼓掌加油
+      document.getElementById('cheer-island-btn').addEventListener('click', () => {
+        if (!activeIsland) return;
+        activeIsland.stats.cheers++;
+        document.getElementById('modal-cheer-count').innerText = activeIsland.stats.cheers;
+        playSoftPopSound();
+        showToast(`為「${activeIsland.name}」送上了暖心掌聲！👏`, 'fa-heart');
+
+        // 同步掌聲到雲端
+        if (window.CloudSync && window.CloudSync.isReady) {
+          window.syncIslandCheerToCloud(activeIsland.id, activeIsland.stats.cheers);
+        }
+      });
+
+      // 降落在此島自習
+      document.getElementById('teleport-here-btn').addEventListener('click', () => {
+        closeIslandModal();
+        if (activeIsland) {
+          const pos = hexToPixel(activeIsland.hexCoord.q, activeIsland.hexCoord.r);
+          movePawnToIsland(pos.x, pos.z);
+        }
+      });
+
+      // 打開便利貼新增輸入框
+      const stickyBox = document.getElementById('sticky-create-box');
+      document.getElementById('open-sticky-form-btn').addEventListener('click', () => {
+        stickyBox.classList.toggle('hidden');
+      });
+      document.getElementById('cancel-sticky-btn').addEventListener('click', () => {
+        stickyBox.classList.add('hidden');
+      });
+
+      // 選擇便利貼顏色
+      let selectedStickyColor = 'yellow';
+      const colorBtns = document.querySelectorAll('#sticky-color-picker button');
+      colorBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+          colorBtns.forEach(b => b.classList.remove('ring-2', 'ring-stone-700'));
+          btn.classList.add('ring-2', 'ring-stone-700');
+          selectedStickyColor = btn.dataset.color;
+        });
+      });
+
+      // 送出便利貼 (雙軌持久化：同時寫入本地 IndexedDB 與雲端 Firestore)
+      document.getElementById('submit-sticky-btn').addEventListener('click', async () => {
+        const input = document.getElementById('sticky-input-text');
+        const submitBtn = document.getElementById('submit-sticky-btn');
+        const text = input.value.trim();
+        if (!text) {
+          showToast('請輸入一點心得筆記再發佈喔！', 'fa-pen');
+          return;
+        }
+
+        if (!activeIsland) {
+          showToast('請先選擇一座宿舍小島！', 'fa-circle-exclamation');
+          return;
+        }
+
+        const stickyId = `stk_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        const newSticky = {
+          id: stickyId,
+          islandId: activeIsland.id,
+          author: playerState.name,
+          color: selectedStickyColor,
+          text: text,
+          time: '剛剛',
+          createdAt: Date.now()
+        };
+
+        // 按鈕視覺轉為儲存中
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<i class="fa-solid fa-spinner animate-spin mr-1"></i>儲存中...';
+
+        try {
+          // 1. 本地即刻置入渲染
+          activeIsland.stickies.unshift(newSticky);
+          renderStickies(activeIsland.stickies);
+          document.getElementById('modal-sticky-count').innerText = activeIsland.stickies.length;
+          
+          input.value = '';
+          stickyBox.classList.add('hidden');
+          playSoftPopSound();
+
+          // 2. 第一軌：寫入瀏覽器永久資料庫 IndexedDB (確保重整絕不遺失)
+          await window.IslandDB.saveSticky(newSticky);
+
+          // 3. 第二軌：若雲端已就緒，同步至全域雲端
+          if (window.CloudSync && window.CloudSync.isReady) {
+            await window.syncNewStickyToCloud(activeIsland.id, newSticky);
+            showToast('已同步至雲端宿舍便箋牆！📌', 'fa-cloud-arrow-up');
+          } else {
+            showToast('已永久保存於本機便箋牆（重整不遺失）！📌', 'fa-floppy-disk');
+          }
+        } catch (err) {
+          console.error('儲存留言時發生狀況：', err);
+          showToast('留言已妥善留存', 'fa-check');
+        } finally {
+          submitBtn.disabled = false;
+          submitBtn.innerHTML = '發佈到島上';
+        }
+      });
+
+      // 個人化通行證 Modal
+      const profileModal = document.getElementById('profile-modal');
+      const profileCard = document.getElementById('profile-modal-card');
+      const openProfileBtn = document.getElementById('my-avatar-btn');
+      const closeProfileBtn = document.getElementById('close-profile-btn');
+
+      openProfileBtn.addEventListener('click', () => {
+        profileModal.classList.remove('opacity-0', 'pointer-events-none');
+        profileCard.classList.remove('scale-95');
+        profileCard.classList.add('scale-100');
+        const cloudSpan = document.getElementById('player-cloud-id');
+        if (window.CloudSync && window.CloudSync.currentUser) {
+          cloudSpan.innerText = window.CloudSync.currentUser.uid;
+        } else {
+          cloudSpan.innerText = '本機永久安全模式';
+        }
+      });
+
+      closeProfileBtn.addEventListener('click', () => {
+        profileModal.classList.add('opacity-0', 'pointer-events-none');
+        profileCard.classList.remove('scale-100');
+        profileCard.classList.add('scale-95');
+      });
+
+      // 挑選化身造型
+      let tempAvatar = playerState.avatar;
+      const avatarBtns = document.querySelectorAll('.avatar-opt');
+      avatarBtns.forEach(ab => {
+        ab.addEventListener('click', () => {
+          avatarBtns.forEach(b => {
+            b.classList.remove('bg-amber-100', 'border-amber-400');
+            b.classList.add('bg-stone-100', 'border-stone-200');
+          });
+          ab.classList.remove('bg-stone-100', 'border-stone-200');
+          ab.classList.add('bg-amber-100', 'border-amber-400');
+          tempAvatar = ab.dataset.avatar;
+        });
+      });
+
+      // 儲存通行證 (同時存至 IndexedDB)
+      document.getElementById('save-profile-btn').addEventListener('click', async () => {
+        const nameVal = document.getElementById('player-nickname-input').value.trim() || '小學友';
+        const statusVal = document.getElementById('player-status-input').value.trim() || '享受學習中';
+        playerState.name = nameVal;
+        playerState.avatar = tempAvatar;
+        playerState.status = statusVal;
+
+        document.getElementById('player-avatar-badge').innerText = tempAvatar;
+        document.getElementById('player-name-label').innerText = nameVal;
+
+        // 存入 IndexedDB
+        await window.IslandDB.saveProfile({
+          name: nameVal,
+          avatar: tempAvatar,
+          status: statusVal
+        });
+
+        profileModal.classList.add('opacity-0', 'pointer-events-none');
+        showToast(`通行證已永久保存：${nameVal} ${tempAvatar}`, 'fa-user-check');
+
+        if (window.updateMyPresence) {
+          window.updateMyPresence();
+        }
+      });
+
+      // 儲存中心設定 Modal 綁定
+      const cloudModal = document.getElementById('cloud-config-modal');
+      const cloudModalCard = document.getElementById('cloud-config-modal-card');
+      const openCloudBtn = document.getElementById('cloud-sync-status');
+      const closeCloudBtn = document.getElementById('close-cloud-config-btn');
+
+      openCloudBtn.addEventListener('click', () => {
+        cloudModal.classList.remove('opacity-0', 'pointer-events-none');
+        cloudModalCard.classList.remove('scale-95');
+        cloudModalCard.classList.add('scale-100');
+      });
+
+      closeCloudBtn.addEventListener('click', () => {
+        cloudModal.classList.add('opacity-0', 'pointer-events-none');
+        cloudModalCard.classList.remove('scale-100');
+        cloudModalCard.classList.add('scale-95');
+      });
+
+      // 清除本機便利貼
+      document.getElementById('clear-local-stickies-btn').addEventListener('click', async () => {
+        if (window.IslandDB && window.IslandDB.db) {
+          const tx = window.IslandDB.db.transaction('stickies', 'readwrite');
+          tx.objectStore('stickies').clear();
+          tx.oncomplete = () => {
+            showToast('已清空本機暫存便利貼', 'fa-trash');
+            setTimeout(() => location.reload(), 800);
+          };
+        }
+      });
+
+      // 儲存手動輸入之 Firebase Config
+      document.getElementById('save-firebase-config-btn').addEventListener('click', async () => {
+        const rawJson = document.getElementById('firebase-config-input').value.trim();
+        if (!rawJson) {
+          showToast('請輸入有效的 JSON 設定', 'fa-circle-exclamation');
+          return;
+        }
+        try {
+          const cfg = JSON.parse(rawJson);
+          showToast('正在連接雲端多人資料庫...', 'fa-spinner');
+          await window.CloudSync.init(cfg);
+          cloudModal.classList.add('opacity-0', 'pointer-events-none');
+          showToast('✅ 成功切換為全球多人即時同步！', 'fa-cloud');
+        } catch(e) {
+          showToast('JSON 格式有誤，請確認後重試', 'fa-triangle-exclamation');
+        }
+      });
+
+      /* ----------------------------------------------------
+         8. 畫面自訂工作台 (Island Studio) 事件綁定
+         ---------------------------------------------------- */
+      const studioDrawer = document.getElementById('studio-drawer');
+      const openStudioBtn = document.getElementById('open-studio-btn');
+      const closeStudioBtn = document.getElementById('close-studio-btn');
+      const quickAddBtn = document.getElementById('quick-add-island-btn');
+
+      function toggleStudio(open) {
+        if (open) {
+          studioDrawer.classList.remove('translate-x-[120%]');
+        } else {
+          studioDrawer.classList.add('translate-x-[120%]');
+        }
+      }
+
+      openStudioBtn.addEventListener('click', () => toggleStudio(true));
+      closeStudioBtn.addEventListener('click', () => toggleStudio(false));
+      if (quickAddBtn) {
+        quickAddBtn.addEventListener('click', () => toggleStudio(true));
+      }
+
+      // 時段光影按鈕
+      const skyBtns = document.querySelectorAll('#atmosphere-selector .sky-btn');
+      skyBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+          skyBtns.forEach(b => {
+            b.classList.remove('active', 'border-2', 'border-amber-400', 'bg-amber-50');
+            b.classList.add('border', 'border-stone-200', 'bg-white');
+          });
+          btn.classList.add('active', 'border-2', 'border-amber-400', 'bg-amber-50');
+          btn.classList.remove('border', 'border-stone-200', 'bg-white');
+
+          const key = btn.dataset.sky;
+          applyAtmosphere(key);
+          playSoftPopSound();
+        });
+      });
+
+      // 移軸景深開關
+      const tiltShiftLayer = document.getElementById('tilt-shift-layer');
+      const tiltShiftToggle = document.getElementById('tilt-shift-toggle');
+      tiltShiftToggle.addEventListener('change', (e) => {
+        if (e.target.checked) {
+          tiltShiftLayer.style.display = 'block';
+          showToast('已開啟微縮景深移軸效果', 'fa-eye');
+        } else {
+          tiltShiftLayer.style.display = 'none';
+          showToast('已關閉景深效果', 'fa-eye-slash');
+        }
+      });
+
+      // 色彩主題選擇
+      const palBtns = document.querySelectorAll('#island-palette-selector .pal-btn');
+      palBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+          palBtns.forEach(b => {
+            b.classList.remove('active', 'border-2', 'border-stone-800', 'bg-amber-50');
+            b.classList.add('border', 'border-stone-200', 'bg-white');
+          });
+          btn.classList.add('active', 'border-2', 'border-stone-800', 'bg-amber-50');
+          btn.classList.remove('border', 'border-stone-200', 'bg-white');
+
+          const key = btn.dataset.palette;
+          applyPalette(key);
+          playSoftPopSound();
+        });
+      });
+
+      // 島嶼高度縮放滑桿
+      const heightSlider = document.getElementById('island-height-slider');
+      const heightValLabel = document.getElementById('height-val-label');
+      heightSlider.addEventListener('input', (e) => {
+        const val = parseFloat(e.target.value);
+        heightValLabel.innerText = `${val.toFixed(1)}x`;
+        ISLAND_COLUMNS.forEach(island => {
+          if (island.groupRef) {
+            island.groupRef.scale.y = val;
+          }
+        });
+      });
+
+      // 雲朵速度滑桿
+      const cloudSpeedSlider = document.getElementById('cloud-speed-slider');
+      const cloudSpeedLabel = document.getElementById('cloud-speed-label');
+      cloudSpeedSlider.addEventListener('input', (e) => {
+        const val = parseFloat(e.target.value);
+        cloudSpeedMultiplier = val;
+        cloudSpeedLabel.innerText = val === 0 ? '靜止' : val > 1.5 ? '快速' : '正常';
+      });
+
+      // 自訂新專欄島嶼
+      document.getElementById('add-custom-island-btn').addEventListener('click', () => {
+        const nameInput = document.getElementById('new-island-name');
+        const iconSelect = document.getElementById('new-island-icon');
+        const colorInput = document.getElementById('new-island-color');
+
+        const islandName = nameInput.value.trim() || '新奇想專欄島';
+        createNewCustomIsland(islandName, iconSelect.value, colorInput.value);
+        nameInput.value = '';
+        toggleStudio(false);
+      });
+
+      // 初始化多人雲端連線
+      if (window.CloudSync) {
+        window.CloudSync.init();
+      }
+
+      // 模擬在線島民小幅自然浮動 (離線備援)
+      setInterval(() => {
+        if (!window.CloudSync || !window.CloudSync.isReady) {
+          const delta = Math.floor(Math.random() * 3) - 1;
+          const countSpan = document.getElementById('live-users-count');
+          let current = parseInt(countSpan.innerText, 10);
+          current = Math.max(12, current + delta);
+          countSpan.innerText = current;
+        }
+      }, 8000);
+    });
+
+    /* ----------------------------------------------------
+       9. 雲端即時多人資料處理函式 (Firebase Real-time Handlers)
+       ---------------------------------------------------- */
+    // (1) 即時監聽：便利貼、其他在線島民位置、掌聲數與新島嶼
+    window.startLiveSubscriptions = function() {
+      const { db, appId, currentUser } = window.CloudSync;
+      if (!db || !currentUser) return;
+
+      // 監聽便利貼集合: /artifacts/{appId}/public/data/stickies
+      const stickiesCol = window.getFirebaseCollection('stickies');
+      window.firebaseOnSnapshot(stickiesCol, (snapshot) => {
+        snapshot.docChanges().forEach((change) => {
+          if (change.type === 'added' || change.type === 'modified') {
+            const data = change.doc.data();
+            const island = ISLAND_COLUMNS.find(i => i.id === data.islandId);
+            if (island) {
+              const docId = change.doc.id;
+              const existsIndex = island.stickies.findIndex(s => s.id === docId || (s.text === data.text && s.author === data.author));
+              
+              const formattedNote = {
+                id: docId,
+                islandId: data.islandId,
+                author: data.author || '匿名島友',
+                color: data.color || 'yellow',
+                text: data.text || '',
+                time: data.time || '剛剛',
+                createdAt: data.createdAt || Date.now()
+              };
+
+              if (existsIndex === -1) {
+                island.stickies.unshift(formattedNote);
+              } else {
+                island.stickies[existsIndex] = formattedNote;
+              }
+
+              // 若當前正開啟此島，立即刷新便條紙
+              if (activeIsland && activeIsland.id === island.id) {
+                renderStickies(island.stickies);
+                const countBadge = document.getElementById('modal-sticky-count');
+                if (countBadge) countBadge.innerText = island.stickies.length;
+              }
+            }
+          }
+        });
+      }, (err) => console.warn('便利貼同步錯誤：', err));
+
+      // 監聽在線同伴動態: /artifacts/{appId}/public/data/presences
+      const presencesCol = window.getFirebaseCollection('presences');
+      window.firebaseOnSnapshot(presencesCol, (snapshot) => {
+        const counts = {};
+        ISLAND_COLUMNS.forEach(i => counts[i.id] = 0);
+        let totalLive = 0;
+
+        snapshot.forEach((d) => {
+          const userDoc = d.data();
+          const uid = d.id;
+          totalLive++;
+
+          if (userDoc.islandId && counts[userDoc.islandId] !== undefined) {
+            counts[userDoc.islandId]++;
+          }
+
+          // 排除自己，並在 3D 空間呈現遠端同伴的人偶
+          if (uid !== currentUser.uid && userDoc.islandId) {
+            const targetIsland = ISLAND_COLUMNS.find(i => i.id === userDoc.islandId);
+            if (targetIsland) {
+              let pawn = otherRemotePlayers[uid];
+              if (!pawn) {
+                pawn = createRemotePlayerPawn(uid, userDoc);
+              }
+              const pos = hexToPixel(targetIsland.hexCoord.q, targetIsland.hexCoord.r);
+              const hash = (uid.charCodeAt(0) || 1) % 5;
+              pawn.position.set(pos.x - 0.7 + (hash * 0.3), 0.45, pos.z - 0.7 + (hash * 0.25));
+            }
+          }
+        });
+
+        // 更新各島的自習人數
+        ISLAND_COLUMNS.forEach(col => {
+          col.stats.learners = Math.max(1, counts[col.id] || 0);
+          const navBtn = document.getElementById(`nav-btn-${col.id}`);
+          if (navBtn) {
+            const span = navBtn.querySelector('.font-semibold');
+            if (span) span.innerHTML = `<i class="fa-solid fa-user text-[9px] mr-0.5"></i>${col.stats.learners}`;
+          }
+        });
+
+        if (activeIsland) {
+          const studyCount = document.getElementById('modal-island-studying-count');
+          if (studyCount) studyCount.innerText = `${activeIsland.stats.learners} 位島友在此自習`;
+        }
+
+        const liveCountSpan = document.getElementById('live-users-count');
+        if (liveCountSpan) {
+          liveCountSpan.innerText = Math.max(1, totalLive);
+        }
+      }, (err) => console.warn('在線狀態同步錯誤：', err));
+
+      // 監聽掌聲累計: /artifacts/{appId}/public/data/islandStats
+      const statsCol = window.getFirebaseCollection('islandStats');
+      window.firebaseOnSnapshot(statsCol, (snapshot) => {
+        snapshot.forEach(docSnap => {
+          const islandId = docSnap.id;
+          const data = docSnap.data();
+          const target = ISLAND_COLUMNS.find(i => i.id === islandId);
+          if (target && data.cheers !== undefined) {
+            target.stats.cheers = data.cheers;
+            if (activeIsland && activeIsland.id === islandId) {
+              const cheerEl = document.getElementById('modal-cheer-count');
+              if (cheerEl) cheerEl.innerText = data.cheers;
+            }
+          }
+        });
+      }, (err) => console.warn('統計同步錯誤：', err));
+    };
+
+    // (2) 輔助函數：取得標準路徑之 Collection
+    window.getFirebaseCollection = function(collName) {
+      const { db, appId } = window.CloudSync;
+      // 嚴格遵循 RULE 1: /artifacts/{appId}/public/data/{collectionName}
+      return window.firebaseCollection(db, 'artifacts', appId, 'public', 'data', collName);
+    };
+
+    // (3) 同步本地自習狀態與位置至雲端
+    window.updateMyPresence = async function() {
+      const { db, appId, currentUser } = window.CloudSync;
+      if (!db || !currentUser) return;
+
+      try {
+        const presenceDoc = window.firebaseDoc(db, 'artifacts', appId, 'public', 'data', 'presences', currentUser.uid);
+        await window.firebaseSetDoc(presenceDoc, {
+          name: playerState.name,
+          avatar: playerState.avatar,
+          islandId: playerState.currentIslandId || 'code-island',
+          status: playerState.status,
+          updatedAt: Date.now()
+        }, { merge: true });
+      } catch (err) {
+        console.warn('更新自習狀態失敗：', err);
+      }
+    };
+
+    // (4) 同步發送便利貼至雲端（遵循 RULE 1 路徑與獨立唯一文件 ID）
+    window.syncNewStickyToCloud = async function(islandId, stickyData) {
+      const { db, appId, currentUser } = window.CloudSync;
+      if (!db || !currentUser) return;
+
+      try {
+        const docId = stickyData.id || `stk_${islandId}_${Date.now()}`;
+        const stickyDoc = window.firebaseDoc(db, 'artifacts', appId, 'public', 'data', 'stickies', docId);
+        await window.firebaseSetDoc(stickyDoc, {
+          id: docId,
+          islandId: islandId,
+          author: stickyData.author || '小島學友',
+          color: stickyData.color || 'yellow',
+          text: stickyData.text,
+          time: stickyData.time || '剛剛',
+          createdAt: stickyData.createdAt || Date.now(),
+          userId: currentUser.uid
+        });
+        console.log('✅ 便利貼已持久存入雲端：', docId);
+      } catch (err) {
+        console.error('便利貼同步上傳失敗：', err);
+        throw err;
+      }
+    };
+
+    // (5) 同步掌聲至雲端
+    window.syncIslandCheerToCloud = async function(islandId, totalCheers) {
+      const { db, appId, currentUser } = window.CloudSync;
+      if (!db || !currentUser) return;
+
+      try {
+        const cheerDoc = window.firebaseDoc(db, 'artifacts', appId, 'public', 'data', 'islandStats', islandId);
+        await window.firebaseSetDoc(cheerDoc, {
+          cheers: totalCheers,
+          lastCheerBy: currentUser.uid,
+          updatedAt: Date.now()
+        }, { merge: true });
+      } catch (err) {
+        console.warn('掌聲同步上傳失敗：', err);
+      }
+    };
+
+    // (6) 同步自訂島嶼至雲端
+    window.syncIslandToCloud = async function(islandData) {
+      const { db, appId, currentUser } = window.CloudSync;
+      if (!db || !currentUser) return;
+
+      try {
+        const islandDoc = window.firebaseDoc(db, 'artifacts', appId, 'public', 'data', 'customIslands', islandData.id);
+        await window.firebaseSetDoc(islandDoc, {
+          id: islandData.id,
+          name: islandData.name,
+          icon: islandData.icon,
+          color: islandData.accentHex,
+          coord: islandData.hexCoord,
+          createdBy: currentUser.uid,
+          createdAt: Date.now()
+        });
+      } catch (err) {
+        console.warn('新島嶼同步上傳失敗：', err);
+      }
+    };
+  </script>
+<script type="module">
+  // Import the functions you need from the SDKs you need
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/13.1.0/firebase-app.js";
+  import { getAnalytics } from "https://www.gstatic.com/firebasejs/13.1.0/firebase-analytics.js";
+  // TODO: Add SDKs for Firebase products that you want to use
+  // https://firebase.google.com/docs/web/setup#available-libraries
+
+  // Your web app's Firebase configuration
+  // For Firebase JS SDK v7.20.0 and later, measurementId is optional
+  const firebaseConfig = {
+    apiKey: "AIzaSyDWhyqwPvQsu6WfBs_QACryv4T5zxyZPb8",
+    authDomain: "wonderisle-dorm.firebaseapp.com",
+    databaseURL: "https://wonderisle-dorm-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId: "wonderisle-dorm",
+    storageBucket: "wonderisle-dorm.firebasestorage.app",
+    messagingSenderId: "331417540014",
+    appId: "1:331417540014:web:a94003ea9e115469bae43f",
+    measurementId: "G-F5FD9HTPN0"
+  };
+
+  // Initialize Firebase
+  const app = initializeApp(firebaseConfig);
+  const analytics = getAnalytics(app);
+</script>
+</body>
+</html>
